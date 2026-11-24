@@ -1,0 +1,5 @@
+data:
+  symbols: ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+  timeframes: ["1h", "4h"]
+  months_back: 25
+  dir: "data"
