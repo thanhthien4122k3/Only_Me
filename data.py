@@ -33,7 +33,7 @@ def fetch_range(exchange, symbol, timeframe, since_ms, until_ms, limit=300):
                     params={"type": "HistoryCandles"},
                 )
                 break
-            except Exception:
+            except (ccxt.NetworkError, ccxt.RateLimitExceeded):
                 if attempt == 2:
                     raise
                 time.sleep(2 + 2 * attempt)
@@ -61,7 +61,7 @@ def file_path(data_dir, symbol, timeframe):
 
 def download_one(exchange, symbol, timeframe, config):
     tf_ms = TF_MS[timeframe]
-    now_ms = exchange.milliseconds()
+    now_ms = exchange.fetch_time()
     months = config["data"]["months_back"]
     since_ms = now_ms - int(months * 30.44 * 86_400_000)
     since_ms -= since_ms % tf_ms  # align to bar boundary
@@ -70,13 +70,25 @@ def download_one(exchange, symbol, timeframe, config):
     path = file_path(config["data"]["dir"], symbol, timeframe)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
-    return df, path
+    return df, path, since_ms, now_ms
 
 
-def quality_report(df, timeframe):
-    """Count rows and detect missing candles (gaps) between first and last bar."""
+def quality_report(df, timeframe, since_ms, now_ms):
+    """Count rows, detect missing candles and coverage truncation."""
     tf_ms = TF_MS[timeframe]
+    if df.empty:
+        return {
+            "rows": 0, "first": None, "last": None, "expected": 0,
+            "missing_bars": 0, "gap_count": 0, "largest_gaps": [],
+            "warnings": ["empty dataframe"],
+        }
     first, last = int(df["ts"].iloc[0]), int(df["ts"].iloc[-1])
+    warnings = []
+    if first > since_ms + 2 * tf_ms:
+        warnings.append("data starts late: possible truncated download")
+    last_closed_open = (now_ms // tf_ms - 1) * tf_ms
+    if last < last_closed_open - 2 * tf_ms:
+        warnings.append("data ends early")
     expected = (last - first) // tf_ms + 1
     full = np.arange(first, last + 1, tf_ms)
     missing = np.setdiff1d(full, df["ts"].values)
@@ -100,4 +112,13 @@ def quality_report(df, timeframe):
              (g[1] - g[0]) // tf_ms + 1)
             for g in gaps[:5]
         ],
+        "warnings": warnings,
     }
+
+
+def load_ohlcv(symbol, timeframe, data_dir):
+    path = file_path(data_dir, symbol, timeframe)
+    df = pd.read_parquet(path)
+    df = df.sort_values("ts").reset_index(drop=True)
+    df["close_time"] = df["timestamp"] + pd.to_timedelta(TF_MS[timeframe], unit="ms")
+    return df

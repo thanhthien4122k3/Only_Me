@@ -28,4 +28,4 @@ python run.py download   # stage 1: fetch OHLCV -> data/*.parquet
 - Only candles whose close time <= fetch time are kept (last, still-open candle is dropped).
 - Volume is in base currency (BTC/ETH/SOL), not USDT.
 
-Status: Stage 1 complete. Stages 2-3 in progress.
+Status: Stage 1 complete and tested.
