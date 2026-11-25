@@ -14,11 +14,6 @@ def _timeline(frames_by_symbol):
             .drop_duplicates().sort_values().reset_index(drop=True))
 
 
-def _slice(frames_by_symbol, pre, end):
-    return {sym: df[(df["timestamp"] >= pre) & (df["timestamp"] <= end)].reset_index(drop=True)
-            for sym, df in frames_by_symbol.items()}
-
-
 def window_metrics(trades, cfg):
     """PF / expectancy / net return over a window, computed from its trades only."""
     m = trade_metrics(trades)
@@ -29,21 +24,29 @@ def window_metrics(trades, cfg):
 
 
 def walk_forward(frames_by_symbol, cfg, market_type="spot", window_months=3,
-                 warmup_months=2, **engine_kwargs):
-    """Fixed-parameter rolling 3-month test windows. Each window is an independent run
-    with fresh capital; features are preloaded warmup_months back so indicators are warm
-    at the window start. Only trades with entry_time >= window start are counted."""
+                 **engine_kwargs):
+    """ONE continuous run over the full data (fixed params, nothing refit), then trades
+    are assigned to 3-month windows by entry_time. Because parameters are never fitted,
+    every window is out-of-sample. Returns (windows_df, pooled_metrics) where pooled
+    metrics include the bootstrap 90% CI of expectancy."""
     ts = _timeline(frames_by_symbol)
     start, end = ts.iloc[0], ts.iloc[-1]
+    trades, orders, equity, skipped, summary = run_backtest(frames_by_symbol, cfg,
+                                                            market_type=market_type,
+                                                            **engine_kwargs)
     w = pd.Timedelta(days=int(window_months * 30.44))
-    warm = pd.Timedelta(days=int(warmup_months * 30.44))
     rows = []
     ws = start
     while ws < end:
         we = min(ws + w, end)
-        trades, _, _, _, _ = run_backtest(_slice(frames_by_symbol, ws - warm, we), cfg,
-                                          market_type=market_type, **engine_kwargs)
-        w_trades = trades[trades["entry_time"] >= ws] if len(trades) else trades
+        last_window = we == end
+        if len(trades):
+            mask = (trades["entry_time"] >= ws) & ((trades["entry_time"] <= we)
+                                                   if last_window
+                                                   else (trades["entry_time"] < we))
+            w_trades = trades[mask]
+        else:
+            w_trades = trades
         m = window_metrics(w_trades, cfg)
         rows.append({"window_start": ws, "window_end": we,
                      "n_trades": m["n_trades"],
@@ -53,20 +56,25 @@ def walk_forward(frames_by_symbol, cfg, market_type="spot", window_months=3,
                      "net_pnl": round(m["net_pnl"], 2),
                      "net_return_pct": round(m["net_return_pct"], 2)})
         ws = we
-    return pd.DataFrame(rows)
+    windows = pd.DataFrame(rows)
+    pooled = compute_metrics(trades, orders, equity, cfg)
+    return windows, pooled
 
 
-def hold_out(frames_by_symbol, cfg, market_type="spot", pct=0.20, warmup_months=2,
-             **engine_kwargs):
-    """Evaluate the last pct of the timeline ONCE. Returns (metrics, split_ts, summary)."""
+def hold_out(frames_by_symbol, cfg, market_type="spot", pct=0.20, **engine_kwargs):
+    """Evaluate the last pct of the timeline ONCE: capital starts fresh at the split and
+    only bars before the split serve as warm-up. Positions still open at the end are
+    marked to market and reported open (open_at_end flag); metrics exclude them but
+    report their count. Returns (metrics, split_ts, summary)."""
     ts = _timeline(frames_by_symbol)
     split = ts.iloc[int(len(ts) * (1 - pct))]
-    warm = pd.Timedelta(days=int(warmup_months * 30.44))
     trades, orders, equity, skipped, summary = run_backtest(
-        _slice(frames_by_symbol, split - warm, ts.iloc[-1]), cfg,
-        market_type=market_type, **engine_kwargs)
-    h_trades = trades[trades["entry_time"] >= split] if len(trades) else trades
-    return window_metrics(h_trades, cfg), split, summary
+        frames_by_symbol, cfg, market_type=market_type,
+        execution_start=split, **engine_kwargs)
+    closed = trades[~trades["open_at_end"]] if len(trades) else trades
+    m = window_metrics(closed, cfg)
+    m["n_open_at_end"] = int(trades["open_at_end"].sum()) if len(trades) else 0
+    return m, split, summary
 
 
 def _pf_str(pf):

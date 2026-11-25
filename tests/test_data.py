@@ -1,8 +1,83 @@
 import pandas as pd
 
-from data import candles_to_df, load_ohlcv, quality_report
+from data import candles_to_df, check_data, check_features, load_ohlcv, quality_report
 
 TF_MS = {"1h": 3_600_000, "4h": 14_400_000}
+
+CFG_SHORT = {"data": {"months_back": 1}}       # 30.44 days coverage needed
+CFG_LONG = {"data": {"months_back": 25}}
+
+
+def make_gate_df(n, step=3_600_000):
+    return candles_to_df(make_candles(n), "1h", 1_700_000_000_000 + (n + 1) * step)
+
+
+def codes(issues, severity=None):
+    return {i["code"] for i in issues if severity is None or i["severity"] == severity}
+
+
+def test_gate_duplicate_ts_critical():
+    df = make_gate_df(200)
+    df = pd.concat([df, df.iloc[[5]]]).sort_values("ts").reset_index(drop=True)
+    assert "ts_invalid" in codes(check_data(df, "1h", CFG_SHORT), "CRITICAL")
+
+
+def test_gate_unsorted_ts_critical():
+    df = make_gate_df(200)
+    df = df.iloc[::-1].reset_index(drop=True)
+    assert "ts_invalid" in codes(check_data(df, "1h", CFG_SHORT), "CRITICAL")
+
+
+def test_gate_ohlc_inconsistent_and_nonpositive_critical():
+    df = make_gate_df(200)
+    df.loc[10, "high"] = df.loc[10, "close"] - 1  # high < close
+    assert "ohlc_inconsistent" in codes(check_data(df, "1h", CFG_SHORT), "CRITICAL")
+    df2 = make_gate_df(200)
+    df2.loc[20, "low"] = -5.0
+    assert "nonpositive_price" in codes(check_data(df2, "1h", CFG_SHORT), "CRITICAL")
+
+
+def test_gate_short_coverage_critical():
+    df = make_gate_df(200)  # 200h ~ 8 days << 25 months
+    assert "short_coverage" in codes(check_data(df, "1h", CFG_LONG), "CRITICAL")
+
+
+def test_gate_too_many_missing_critical():
+    df = make_gate_df(1000)
+    df = df.drop(df.index[100:110]).reset_index(drop=True)  # 10/1000 = 1%
+    assert "too_many_missing" in codes(check_data(df, "1h", CFG_SHORT), "CRITICAL")
+
+
+def test_gate_large_gap_critical():
+    df = make_gate_df(1000)
+    df = df.drop(df.index[100:114]).reset_index(drop=True)  # 14 consecutive bars
+    assert "large_gap" in codes(check_data(df, "1h", CFG_SHORT), "CRITICAL")
+
+
+def test_gate_warns_not_critical():
+    df = make_gate_df(1000)
+    df = df.drop(df.index[50]).reset_index(drop=True)  # 1 missing bar
+    df.loc[5, "volume"] = 0.0
+    issues = check_data(df, "1h", CFG_SHORT)
+    assert "small_gap" in codes(issues, "WARN")
+    assert "zero_volume" in codes(issues, "WARN")
+    assert not codes(issues, "CRITICAL")
+
+
+def test_gate_clean_data_no_issues():
+    df = make_gate_df(1000)
+    assert check_data(df, "1h", CFG_SHORT) == []
+
+
+def test_gate_feature_nan_critical():
+    df = make_gate_df(400)
+    feat = df.copy()
+    feat["ema20"] = 1.0
+    feat["ema50"] = 1.0
+    feat.loc[300, "ema50"] = float("nan")  # NaN after warm-up 250
+    issues = check_features(feat, ["ema20", "ema50"])
+    assert any(i["severity"] == "CRITICAL" and i["code"] == "feature_nan" for i in issues)
+    assert check_features(df.assign(ema20=1.0), ["ema20"]) == []
 
 
 def make_candles(n, start_ts=1_700_000_000_000, step=3_600_000):

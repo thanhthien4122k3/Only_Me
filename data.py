@@ -228,3 +228,74 @@ def download_futures(config):
               f"cuối={fdf['time'].iloc[-1] if len(fdf) else None} "
               f"(OKX chỉ có lịch sử funding ~3 tháng)")
     return meta
+
+
+def check_data(df, timeframe, cfg):
+    """Data quality gate. Returns a list of {"severity": CRITICAL|WARN, "code", "message"}."""
+    issues = []
+    if df.empty:
+        issues.append({"severity": "CRITICAL", "code": "empty", "message": "dataframe rỗng"})
+        return issues
+    tf_ms = TF_MS[timeframe]
+    if df["ts"].duplicated().any() or not df["ts"].is_monotonic_increasing:
+        issues.append({"severity": "CRITICAL", "code": "ts_invalid",
+                       "message": "ts trùng lặp hoặc không tăng dần"})
+    bad = (df["high"] < df[["open", "close"]].max(axis=1)) | \
+          (df["low"] > df[["open", "close"]].min(axis=1))
+    if bad.any():
+        issues.append({"severity": "CRITICAL", "code": "ohlc_inconsistent",
+                       "message": f"{int(bad.sum())} nến có high/low mâu thuẫn open/close"})
+    if (df[["open", "high", "low", "close"]] <= 0).any().any():
+        issues.append({"severity": "CRITICAL", "code": "nonpositive_price",
+                       "message": "có giá <= 0"})
+    months = cfg["data"]["months_back"]
+    min_days = months * 30.44 - 7
+    coverage_days = (int(df["ts"].iloc[-1]) - int(df["ts"].iloc[0])) / 86_400_000
+    if coverage_days < min_days:
+        issues.append({"severity": "CRITICAL", "code": "short_coverage",
+                       "message": f"độ phủ {coverage_days:.0f} ngày < {min_days:.0f} ngày"})
+    first, last = int(df["ts"].iloc[0]), int(df["ts"].iloc[-1])
+    expected = (last - first) // tf_ms + 1
+    missing = expected - len(df)
+    if missing > 0:
+        full = np.arange(first, last + 1, tf_ms)
+        miss = np.setdiff1d(full, df["ts"].values)
+        gaps = []
+        for ts_ms in miss:
+            if gaps and ts_ms == gaps[-1][1] + tf_ms:
+                gaps[-1][1] = ts_ms
+            else:
+                gaps.append([ts_ms, ts_ms])
+        for g in gaps:
+            n = (g[1] - g[0]) // tf_ms + 1
+            t0 = pd.to_datetime(g[0], unit="ms", utc=True)
+            if n > 12:
+                issues.append({"severity": "CRITICAL", "code": "large_gap",
+                               "message": f"gap {n} nến liên tiếp tại {t0}"})
+            else:
+                issues.append({"severity": "WARN", "code": "small_gap",
+                               "message": f"gap {n} nến tại {t0}"})
+        if missing > 0.005 * expected:
+            issues.append({"severity": "CRITICAL", "code": "too_many_missing",
+                           "message": f"thiếu {missing}/{expected} nến "
+                                      f"({missing / expected * 100:.2f}%)"})
+    zero_vol = int((df["volume"] == 0).sum())
+    if zero_vol:
+        issues.append({"severity": "WARN", "code": "zero_volume",
+                       "message": f"{zero_vol} nến volume = 0"})
+    return issues
+
+
+def check_features(features_df, required_cols, warmup_bars=250):
+    """CRITICAL if any required feature is NaN after the indicator warm-up."""
+    issues = []
+    for col in required_cols:
+        if col not in features_df.columns:
+            issues.append({"severity": "CRITICAL", "code": "feature_missing",
+                           "message": f"thiếu cột feature {col}"})
+            continue
+        n = int(features_df[col].iloc[warmup_bars:].isna().sum())
+        if n:
+            issues.append({"severity": "CRITICAL", "code": "feature_nan",
+                           "message": f"{col}: {n} NaN sau warm-up {warmup_bars} nến"})
+    return issues

@@ -71,21 +71,25 @@ def test_window_metrics_basic():
 def test_walk_forward_windows_and_trade_membership():
     cfg = make_cfg()
     frames = {"X/USDT": with_signals(make_features(6000))}
-    wf = walk_forward(frames, cfg, warmup_months=2)
+    wf, pooled = walk_forward(frames, cfg)
     assert len(wf) >= 2
     assert (wf["window_start"].diff().dropna() > pd.Timedelta(0)).all()
     assert wf["window_end"].iloc[-1] == frames["X/USDT"]["timestamp"].iloc[-1]
     assert (wf["n_trades"] >= 0).all()
+    # one continuous run: windows partition all trades by entry_time
+    assert pooled["n_trades"] == wf["n_trades"].sum()
+    assert "expectancy_ci_90_lo" in pooled
 
 
 def test_hold_out_split_and_filtering():
     cfg = make_cfg()
     frames = {"X/USDT": with_signals(make_features(6000))}
-    m, split, summary = hold_out(frames, cfg, warmup_months=2)
+    m, split, summary = hold_out(frames, cfg)
     total = frames["X/USDT"]["timestamp"].iloc[-1] - frames["X/USDT"]["timestamp"].iloc[0]
     expected = frames["X/USDT"]["timestamp"].iloc[0] + 0.8 * total
     assert abs((split - expected).total_seconds()) < 3 * 3600
     assert m["n_trades"] >= 0
+    assert "n_open_at_end" in m
 
 
 def test_gate1_pass_and_fail_and_warning():

@@ -3,6 +3,9 @@ import pandas as pd
 
 from indicators import adx, atr, ema, rsi
 
+FEATURE_COLS = ["ema20", "ema50", "rsi", "adx", "atr", "vol_sma",
+                "prior_high", "trend4h_ok", "exit_trend", "signal"]
+
 
 def build_features(df_1h, df_4h, cfg):
     s = cfg["strategy"]

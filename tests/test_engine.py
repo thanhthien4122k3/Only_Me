@@ -185,6 +185,76 @@ def test_validate_config_rejects_null_fee():
         validate_config(bad)
 
 
+def test_no_entries_before_execution_start():
+    feat = make_features([100.0] * 15, signals=[3])  # entry would be bar 4 (warm-up)
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, make_cfg(),
+                                      execution_start=feat["timestamp"].iloc[10])
+    assert len(trades) == 0
+
+
+def test_warmup_signal_fills_at_first_test_bar_open():
+    feat = make_features([100.0] * 15, signals=[9])  # signal on the last warm-up bar
+    start = feat["timestamp"].iloc[10]
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, make_cfg(), execution_start=start)
+    t = trades.iloc[0]
+    assert t["entry_time"] == start
+    assert t["entry_price"] == pytest.approx(feat["open"].iloc[10] * 1.0005)
+
+
+def test_entry_time_always_gte_execution_start():
+    feat = make_features([100.0] * 40, signals=[3, 15, 25])
+    start = feat["timestamp"].iloc[20]
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, make_cfg(), execution_start=start)
+    assert len(trades) >= 1
+    assert (trades["entry_time"] >= start).all()
+
+
+def test_capital_fresh_at_execution_start():
+    feat = make_features([100.0] * 40, signals=[3, 15, 25])
+    start = feat["timestamp"].iloc[20]
+    _, _, equity, _, _ = run_backtest({"X/USDT": feat}, make_cfg(), execution_start=start)
+    assert equity["timestamp"].iloc[0] == start
+    assert equity["equity"].iloc[0] == pytest.approx(1000.0)
+
+
+def test_open_at_end_flag_with_execution_end():
+    feat = make_features([100.0] * 20, signals=[3])
+    end = feat["timestamp"].iloc[15]
+    trades, _, _, _, summary = run_backtest({"X/USDT": feat}, make_cfg(), execution_end=end)
+    t = trades.iloc[0]
+    assert bool(t["open_at_end"])
+    assert t["exit_reason"] == "open_at_end"
+    assert t["exit_time"] is None
+    assert t["net_pnl"] == 0.0
+    assert summary["n_open_at_end"] == 1
+
+
+def test_fees_by_market():
+    cfg = make_cfg()
+    cfg["backtest"]["fee_pct"] = 0.5          # default fallback
+    cfg["backtest"]["fee_pct_spot"] = 0.1     # spot uses this
+    cfg["backtest"]["fee_pct_futures"] = 0.2  # futures uses this
+    cfg["futures"] = {"leverage": 2.0, "maintenance_margin_rate": 0.005,
+                      "funding_enabled": True}
+    feat = make_features([100.0] * 10, signals=[3])
+    t_s = run_backtest({"X/USDT": feat}, cfg)[0].iloc[0]
+    assert t_s["entry_fee"] == pytest.approx(t_s["quantity"] * t_s["entry_price"] * 0.001)
+    meta = {"ctVal": 0.01, "lotSz": 0.01, "minSz": 0.01, "tickSz": 0.1,
+            "settleCcy": "USDT"}
+    t_f = run_backtest({"X/USDT": feat}, cfg, market_type="futures",
+                       contract_meta={"X/USDT": meta})[0].iloc[0]
+    assert t_f["entry_fee"] == pytest.approx(t_f["quantity"] * t_f["entry_price"] * 0.002)
+
+
+def test_fee_fallback_to_default():
+    cfg = make_cfg()
+    cfg["backtest"]["fee_pct"] = 0.5
+    cfg["backtest"]["skip_cost_ratio"] = 0.0  # tránh skip-rule loại tín hiệu
+    feat = make_features([100.0] * 10, signals=[3])
+    t = run_backtest({"X/USDT": feat}, cfg)[0].iloc[0]
+    assert t["entry_fee"] == pytest.approx(t["quantity"] * t["entry_price"] * 0.005)
+
+
 def test_engine_no_lookahead():
     cfg = load_config(str(Path(__file__).resolve().parent.parent / "config.yaml"))
     n1 = 1500

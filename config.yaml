@@ -24,7 +24,9 @@ backtest:
   quote_currency: USDT
   fill_policy: next_bar_open     # v1: only supported policy
   exit_fill: next_open           # close-based exits fill at next bar open (next_open | close)
-  fee_pct: 0.10                  # placeholder per side - verify actual OKX tier
+  fee_pct: 0.10                  # default per-side fee (fallback khi chưa có key riêng)
+  fee_pct_spot: 0.10             # spot per-side fee placeholder - verify actual OKX tier
+  fee_pct_futures: 0.10          # futures per-side fee placeholder - verify actual OKX tier
   slippage_pct: 0.05             # placeholder per side
   skip_cost_ratio: 0.20          # skip signal if round-trip cost % / stop distance % > this (0 = off)
 

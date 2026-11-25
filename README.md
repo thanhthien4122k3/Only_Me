@@ -40,6 +40,7 @@ python run.py backtest --market spot --symbol BTC/USDT
 python run.py validate --market spot            # walk-forward + hold-out + Gate 1 -> results/gate1.md
 python run.py sweep --market spot --param risk.notional_cap=200,300,500
 python run.py compare-exits --market spot        # 4 fixed exit configs, ALL results -> results/compare_exits.csv
+python run.py snapshot --label <ten>              # spot config B headline metrics -> results/snapshot_<ten>.csv
 python -m pytest tests/ -q                      # offline test suite
 ```
 
@@ -113,8 +114,45 @@ metrics.py             portfolio/trade metrics, costs, bootstrap CI, benchmarks
 report.py              run-scoped outputs, metadata, fingerprints, comparison
 validation.py          walk-forward, hold-out, Gate 1, tiny parameter sweeps
 run.py                 CLI
-tests/                 57 offline tests (incl. no-look-ahead proofs)
+tests/                 81 offline tests (incl. no-look-ahead proofs + accounting invariants)
 ```
+
+## Quy tắc & giới hạn cần biết trước khi tin vào kết quả
+
+### (a) `risk.risk_pct` chỉ là tham chiếu sizing, KHÔNG phải mức lỗ tối đa
+`risk.risk_pct` (mặc định 0.5%) dùng để tính khối lượng:
+`qty = (equity x risk_pct) / (stop_atr_mult x ATR)`. Nếu `stops.initial_stop_enabled: false`
+(mặc định), stop ATR **không được thực thi** — một lệnh chỉ thoát bằng EMA20<EMA50 (hoặc
+time-stop nếu bật) và có thể lỗ **nhiều hơn** 0.5% vốn. Kiểm tra 2 chỉ số trong summary.md:
+`Lệnh thua lớn nhất (% vốn ban đầu)` và `Thua thực tế / rủi ro dự kiến (lệnh thua)` để biết
+lỗ thực tế so với rủi ro dự kiến là bao nhiêu.
+
+### (b) Execution window (cửa sổ chạy)
+`run_backtest(..., execution_start, execution_end)`:
+- Các bar trước `execution_start` chỉ là **warm-up** (tính indicator), không entry, không
+  exit; vốn bắt đầu mới tại `execution_start`.
+- Tín hiệu trên nến warm-up cuối cùng được phép khớp tại open của nến đầu tiên >= start.
+- Khi có `execution_end`: vị thế còn mở được mark-to-market và báo OPEN (cờ `open_at_end`),
+  **không force-close**; metrics loại chúng ra nhưng báo số lượng.
+- Walk-forward hiện là **1 lần chạy liên tục** toàn bộ dữ liệu, gán lệnh vào cửa sổ 3 tháng
+  theo entry_time. Hold-out chạy với `execution_start` = điểm chia 80/20 (vốn mới tại đó).
+
+### (c) Official vs EXPLORATORY run
+`backtest` / `validate` chạy **data quality gate** trước: lỗi CRITICAL (ts trùng/lộn xộn,
+OHLC mâu thuẫn, giá <= 0, độ phủ ngắn, gap > 12 nến, thiếu > 0.5% nến, feature NaN sau
+warm-up) → dừng với thông báo rõ. Dùng `--exploratory` để chạy tiếp — summary.md và
+run_metadata.json sẽ gắn nhãn **EXPLORATORY** và kết quả không được coi là chính thức.
+
+### (d) Giới hạn còn lại
+- `fee_pct_spot` / `fee_pct_futures` / `slippage_pct` là giá trị tạm — phải verify mức phí
+  OKX thật của tài khoản.
+- Futures: maintenance margin đơn tầng (OKX dùng tier), giá thanh lý KHÔNG tương đương
+  OKX; funding thật chỉ ~3 tháng, các kỳ còn lại dùng mức fallback giả định (ghi rõ).
+- Chỉ có OHLCV → thứ tự stop/TP trong nến là giả định bảo thủ (stop trước); market order
+  full-fill, chưa có limit/partial fill.
+- 1 vị thế/symbol, tối đa 3 vị thế đồng thời, chỉ long — chưa hỗ trợ short.
+- Chưa có paper trading / live trading; backtest profit không phải bằng chứng lợi nhuận
+  tương lai.
 
 ## Status
 

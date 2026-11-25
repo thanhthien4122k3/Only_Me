@@ -50,6 +50,7 @@ class Position:
     bars_held: int = 0
     exit_reason: str = ""
     pending_exit: str = ""       # close-based exit decided; fills at next bar open
+    open_at_end: bool = False    # True when execution_end set and position still open
     position_id: str = ""
     leverage: float = 1.0
     initial_margin: float = 0.0
@@ -74,7 +75,7 @@ def validate_config(cfg):
 
 
 def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=None,
-                 contract_meta=None):
+                 contract_meta=None, execution_start=None, execution_end=None):
     """Chronological bar loop over all symbols.
 
     Signal on CLOSED bar t -> entry at bar t+1 OPEN (fill_policy=next_bar_open).
@@ -87,16 +88,26 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
     funding payments are applied at funding timestamps using the close of the bar
     that closes at the funding time as the mark-price proxy. Where no real funding data
     exists, the fallback rate is applied at 00/08/16 UTC (counted separately as assumed).
+
+    execution_start / execution_end (optional Timestamps): bars before execution_start are
+    warm-up only - no entries and no exits are processed there, and equity/capital starts
+    fresh at execution_start. A signal on the last warm-up bar may fill at the first bar
+    >= execution_start (its open). With execution_end set, positions still open there are
+    marked to market and reported OPEN (open_at_end flag), not force-closed.
     """
     validate_config(cfg)
     bt, rk, st = cfg["backtest"], cfg["risk"], cfg["stops"]
     sp = cfg.get("spot", {})
-    fee = bt["fee_pct"] / 100.0
+    is_futures = market_type == "futures"
+    fee_key = "fee_pct_futures" if is_futures else "fee_pct_spot"
+    fee_pct = bt.get(fee_key, bt.get("fee_pct"))
+    if fee_pct is None:
+        raise ValueError(f"config.backtest.{fee_key} (hoặc fee_pct) là bắt buộc")
+    fee = fee_pct / 100.0
     slip = bt["slippage_pct"] / 100.0
     exit_fill = bt.get("exit_fill", "next_open")
     if exit_fill not in ("next_open", "close"):
         raise ValueError("config.backtest.exit_fill must be 'next_open' or 'close'")
-    is_futures = market_type == "futures"
 
     funding_enabled = False
     fallback_rate = 0.0
@@ -125,6 +136,10 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
         frames[sym] = f.set_index("timestamp")
 
     timeline = sorted(set().union(*(f.index for f in frames.values())))
+    if execution_start is not None:
+        timeline = [ts for ts in timeline if ts >= execution_start]
+    if execution_end is not None:
+        timeline = [ts for ts in timeline if ts <= execution_end]
     positions, trades, orders, skipped, equity_rows = {}, [], [], [], []
     last_close, last_equity = {}, bt["initial_capital"]
 
@@ -358,13 +373,32 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
 
     # close anything still open at the last available close (flagged in exit_reason)
     n_forced = 0
-    for sym, pos in list(positions.items()):
-        reason = pos.pending_exit + "_eod" if pos.pending_exit else "end_of_data"
-        close_pos(pos, last_close.get(sym, pos.entry_price), timeline[-1], reason)
-        n_forced += 1
-    if n_forced:
-        equity_rows[-1] = {"timestamp": timeline[-1], "equity": acc["cash"],
-                           "cash": acc["cash"], "exposure_pct": 0.0}
+    n_open = 0
+    if timeline:
+        if execution_end is not None:
+            for sym, pos in list(positions.items()):
+                if pos.pending_exit:
+                    close_pos(pos, last_close.get(sym, pos.entry_price), timeline[-1],
+                              pos.pending_exit + "_eod")
+                    n_forced += 1
+                else:
+                    # marked to market, reported open (not force-closed)
+                    pos.open_at_end = True
+                    pos.exit_price = last_close.get(sym, pos.entry_price)
+                    pos.exit_reason = "open_at_end"
+                    pos.status = "open"
+                    pos.realized_pnl = 0.0
+                    pos.net_pnl = 0.0
+                    trades.append(pos)
+                    n_open += 1
+        else:
+            for sym, pos in list(positions.items()):
+                reason = pos.pending_exit + "_eod" if pos.pending_exit else "end_of_data"
+                close_pos(pos, last_close.get(sym, pos.entry_price), timeline[-1], reason)
+                n_forced += 1
+            if n_forced:
+                equity_rows[-1] = {"timestamp": timeline[-1], "equity": acc["cash"],
+                                   "cash": acc["cash"], "exposure_pct": 0.0}
 
     for i, o in enumerate(orders):
         o.order_id = f"O{i + 1}"
@@ -394,5 +428,6 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
         "n_rejected": int((orders_df["status"] == "REJECTED").sum()) if len(orders_df) else 0,
         "n_skipped": len(skipped),
         "n_forced_close": n_forced,
+        "n_open_at_end": n_open,
     }
     return trades_df, orders_df, equity_df, skipped_df, summary

@@ -27,11 +27,13 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def write_run_metadata(out_dir, cfg, summary, metrics, data_sources, cli_note):
+def write_run_metadata(out_dir, cfg, summary, metrics, data_sources, cli_note,
+                       exploratory=False):
     """Reproducibility: config snapshot + data fingerprints + assumptions."""
     meta = {
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "cli": cli_note,
+        "exploratory": exploratory,
         "config": cfg,
         "summary": {k: str(v) for k, v in summary.items()},
         "metrics": {k: str(v) if isinstance(v, float) else v for k, v in metrics.items()},
@@ -144,7 +146,8 @@ SKIP_REASONS = {
 }
 
 
-def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchmarks, out_dir="results"):
+def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchmarks,
+                 out_dir="results", exploratory=False):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     trades.to_csv(out / "trades.csv", index=False)
@@ -165,10 +168,15 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
     skip_counts = skipped["reason"].value_counts().to_dict() if len(skipped) else {}
 
     market_vi = "futures (swap)" if summary.get("market_type") == "futures" else "spot"
-    lines = [f"# Tổng kết Backtest ({market_vi})", "",
-             f"- Sinh lúc: {pd.Timestamp.now(tz='UTC').isoformat(timespec='seconds')}",
-             f"- Cặp giao dịch: {', '.join(cfg['data']['symbols'])}",
-             f"- Phí: {cfg['backtest']['fee_pct']}% mỗi chiều (giá trị tạm), "
+    fee_key = "fee_pct_futures" if summary.get("market_type") == "futures" else "fee_pct_spot"
+    fee_shown = cfg["backtest"].get(fee_key, cfg["backtest"]["fee_pct"])
+    lines = [f"# Tổng kết Backtest ({market_vi})", ""]
+    if exploratory:
+        lines += ["- **EXPLORATORY RUN** - dữ liệu không qua data gate "
+                  "(chạy với --exploratory); kết quả không được coi là chính thức.", ""]
+    lines += [f"- Sinh lúc: {pd.Timestamp.now(tz='UTC').isoformat(timespec='seconds')}",
+              f"- Cặp giao dịch: {', '.join(cfg['data']['symbols'])}",
+              f"- Phí: {fee_shown}% mỗi chiều (giá trị tạm), "
              f"Slippage: {cfg['backtest']['slippage_pct']}% mỗi chiều (giá trị tạm)",
              f"- Chính sách khớp lệnh: {cfg['backtest']['fill_policy']}",
              f"- Size: rủi ro {cfg['risk']['risk_pct']}% vốn mỗi lệnh, tối đa "
