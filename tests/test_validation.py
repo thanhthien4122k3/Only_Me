@@ -3,8 +3,8 @@ import pandas as pd
 import pytest
 
 from data import TF_MS
-from validation import (gate1_checklist, hold_out, param_sweep, walk_forward,
-                        window_metrics)
+from validation import (compare_exits, gate1_checklist, hold_out, param_sweep,
+                        walk_forward, window_metrics)
 
 BASE = 1_700_000_000_000
 H1 = TF_MS["1h"]
@@ -108,6 +108,18 @@ def test_gate1_pass_and_fail_and_warning():
                  "profit_factor": 3.1}
     _, warnings3 = gate1_checklist(full_warn, ho_pass, wf_pass)
     assert any("2.5" in w for w in warnings3)
+
+
+def test_compare_exits_runs_all_4():
+    cfg = make_cfg()
+    frames = {"X/USDT": with_signals(make_features(1500))}
+    df = compare_exits(frames, cfg)
+    assert len(df) == 4
+    assert list(df["config"].str[0]) == ["A", "B", "C", "D"]
+    for col in ["trades", "win rate", "PF", "expectancy USDT", "net return %",
+                "max drawdown %", "max_single_loss_pct_of_equity",
+                "realized_vs_planned_risk", "total costs"]:
+        assert col in df.columns
 
 
 def test_param_sweep_returns_all_combos():

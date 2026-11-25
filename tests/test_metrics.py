@@ -101,6 +101,9 @@ def test_compute_metrics_end_to_end():
     assert m["total_fees"] == pytest.approx(0.4)  # 2 trades x 2 fills x 0.1
     assert m["total_costs"] > m["total_fees"]
     assert m["n_trades"] == 2
+    # losing trade: -4 USDT on 1000 initial -> -0.4%; planned risk = 1*(100-97) = 3
+    assert m["max_single_loss_pct_of_equity"] == pytest.approx(-0.4)
+    assert m["realized_vs_planned_risk"] == pytest.approx(4.0 / 3.0)
 
 
 def test_empty_trades_no_crash():

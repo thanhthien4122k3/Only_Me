@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from engine import run_backtest
-from metrics import trade_metrics
+from metrics import compute_metrics, trade_metrics
 
 
 def _timeline(frames_by_symbol):
@@ -112,6 +112,42 @@ def gate1_checklist(full_metrics, holdout_metrics, wf_df):
             warnings.append(f"CẢNH BÁO: profit factor {name} = {pf:.2f} > 2.5 - "
                             f"nhiều khả năng có bug hoặc look-ahead!")
     return pd.DataFrame(checks), warnings
+
+
+def compare_exits(frames_by_symbol, cfg, market_type="spot", **engine_kwargs):
+    """4 fixed exit configs on the same data. ALL results returned - nothing selected."""
+    base = deepcopy(cfg)
+    base["stops"].update({"ema_exit_enabled": True, "initial_stop_enabled": False,
+                          "take_profit_r": None, "trailing_enabled": False,
+                          "trailing_atr_mult": 2.5, "time_stop_bars": None})
+    b = deepcopy(base)
+    b["stops"]["initial_stop_enabled"] = True
+    c = deepcopy(b)
+    c["stops"]["trailing_enabled"] = True
+    d = deepcopy(b)
+    d["stops"]["take_profit_r"] = 2.0
+    d["stops"]["time_stop_bars"] = 24
+    variants = [("A: ema_exit", base), ("B: ema + ATR stop", b),
+                ("C: B + trailing 2.5", c), ("D: B + TP 2R + time 24", d)]
+    rows = []
+    for label, c_ in variants:
+        trades, orders, equity, skipped, summary = run_backtest(
+            frames_by_symbol, c_, market_type=market_type, **engine_kwargs)
+        m = compute_metrics(trades, orders, equity, c_)
+        pf = m["profit_factor"]
+        rows.append({
+            "config": label,
+            "trades": m["n_trades"],
+            "win rate": round(m["win_rate_pct"], 2),
+            "PF": round(pf, 3) if np.isfinite(pf) else "inf",
+            "expectancy USDT": round(m["expectancy_usdt"], 4),
+            "net return %": round(m["net_return_pct"], 2),
+            "max drawdown %": round(m["max_drawdown_pct"], 2),
+            "max_single_loss_pct_of_equity": round(m["max_single_loss_pct_of_equity"], 2),
+            "realized_vs_planned_risk": round(m["realized_vs_planned_risk"], 3),
+            "total costs": round(m["total_costs"], 2),
+        })
+    return pd.DataFrame(rows)
 
 
 def param_sweep(frames_by_symbol, cfg, param_lists, market_type="spot", **engine_kwargs):

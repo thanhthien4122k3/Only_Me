@@ -16,7 +16,7 @@ from metrics import compute_benchmarks, compute_metrics
 from report import (compare_markets, make_run_id, write_compare, write_report,
                     write_run_metadata)
 from strategy import build_features, funnel
-from validation import gate1_checklist, hold_out, param_sweep, walk_forward
+from validation import compare_exits, gate1_checklist, hold_out, param_sweep, walk_forward
 
 
 def cmd_download(config, args):
@@ -206,6 +206,22 @@ def cmd_sweep(config, args):
     print("đã lưu results/sweep.csv")
 
 
+def cmd_compare_exits(config, args):
+    if args.market == "all":
+        print("compare-exits hỗ trợ từng market riêng: spot hoặc futures.")
+        sys.exit(2)
+    frames, ekw, _, _ = _ctx(config, args.symbol, args.market)
+    df = compare_exits(frames, config, market_type=args.market, **ekw)
+    print("\n=== So sánh 4 cấu hình thoát lệnh (cùng dữ liệu, in TẤT CẢ kết quả) ===")
+    print(df.to_string(index=False))
+    out = Path("results")
+    out.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out / "compare_exits.csv", index=False)
+    print("đã lưu results/compare_exits.csv")
+    print("\nLưu ý: KHÔNG chọn hàng có lợi nhuận cao nhất - hãy chọn theo drawdown và "
+          "độ ổn định, sau đó xác nhận lại bằng walk-forward.")
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -226,6 +242,9 @@ def main():
     s.add_argument("--symbol", default=None)
     s.add_argument("--param", action="append", metavar="SECTION.KEY=v1,v2,v3",
                    help="repeatable, e.g. --param risk.notional_cap=200,300,500")
+    ce = sub.add_parser("compare-exits", help="Compare 4 fixed exit configs on the same data")
+    ce.add_argument("--market", choices=["spot", "futures", "all"], default="spot")
+    ce.add_argument("--symbol", default=None)
     args = parser.parse_args()
     config = load_config("config.yaml")
     try:
@@ -243,6 +262,8 @@ def main():
         cmd_validate(config, args)
     elif args.command == "sweep":
         cmd_sweep(config, args)
+    elif args.command == "compare-exits":
+        cmd_compare_exits(config, args)
 
 
 if __name__ == "__main__":

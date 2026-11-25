@@ -96,6 +96,7 @@ def test_funding_applied_and_net_pnl_includes_it():
     cfg = make_cfg()
     cfg["stops"]["initial_stop_enabled"] = False  # hold through end
     cfg["risk"]["notional_cap"] = 1e9  # no cap: qty purely risk-based
+    cfg["futures"]["funding_fallback_rate_per_8h"] = 0.0  # isolate real funding in this test
     rate = 0.0005
     funding = pd.DataFrame({
         "ts": [BASE + 6 * H1],  # during bar 6 (held position)
@@ -114,6 +115,26 @@ def test_funding_applied_and_net_pnl_includes_it():
     assert t["net_pnl"] == pytest.approx(
         t["realized_pnl"] - t["entry_fee"] - t["exit_fee"] - t["funding_fee"])
     # equity invariant: final cash = initial + sum(net_pnl)
+    assert summary["final_equity"] == pytest.approx(1000.0 + trades["net_pnl"].sum())
+
+
+def test_funding_real_and_fallback():
+    cfg = make_cfg()
+    cfg["stops"]["initial_stop_enabled"] = False
+    cfg["risk"]["notional_cap"] = 1e9
+    feat = make_features([100.0] * 20, signals=[3])
+    H8 = 8 * H1
+    mark = 1_700_035_200_000  # 00:00 UTC schedule mark inside the timeline
+    funding = pd.DataFrame({"ts": [mark], "rate": [0.001]})
+    trades, _, _, _, summary = run_backtest(
+        {"X/USDT": feat}, cfg, market_type="futures",
+        funding_by_symbol={"X/USDT": funding}, contract_meta={"X/USDT": META})
+    assert summary["n_funding_payments"] == 1      # real at the mark
+    assert summary["n_funding_fallback"] == 1      # next 8h mark has no real data
+    t = trades.iloc[0]
+    qty = t["quantity"]
+    assert summary["funding_assumed_usdt"] == pytest.approx(qty * 100.0 * 0.0001)
+    assert t["funding_fee"] == pytest.approx(qty * 100.0 * (0.001 + 0.0001))
     assert summary["final_equity"] == pytest.approx(1000.0 + trades["net_pnl"].sum())
 
 

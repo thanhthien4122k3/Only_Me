@@ -82,12 +82,30 @@ def test_gap_beyond_stop_fills_at_open():
     assert t["exit_price"] == pytest.approx(90.0 * 0.9995)
 
 
-def test_ema_exit_at_close():
+def test_close_exit_fills_next_bar_open():
     feat = make_features([100.0] * 10, signals=[3], exit_trend=[6])
     trades, _, _, _, _ = run_backtest({"X/USDT": feat}, make_cfg())
     t = trades.iloc[0]
     assert t["exit_reason"] == "ema_exit"
+    assert t["exit_time"] == feat["timestamp"].iloc[7]  # decided at bar 6 -> fill bar 7 open
+    assert t["exit_price"] == pytest.approx(feat["open"].iloc[7] * 0.9995)
+
+
+def test_close_exit_at_close_legacy():
+    cfg = make_cfg()
+    cfg["backtest"]["exit_fill"] = "close"
+    feat = make_features([100.0] * 10, signals=[3], exit_trend=[6])
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, cfg)
+    t = trades.iloc[0]
     assert t["exit_time"] == feat["timestamp"].iloc[6]
+    assert t["exit_price"] == pytest.approx(100.0 * 0.9995)
+
+
+def test_pending_exit_at_eod_flagged():
+    feat = make_features([100.0] * 8, signals=[3], exit_trend=[7])  # decision on last bar
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, make_cfg())
+    t = trades.iloc[0]
+    assert t["exit_reason"] == "ema_exit_eod"
     assert t["exit_price"] == pytest.approx(100.0 * 0.9995)
 
 
@@ -98,7 +116,9 @@ def test_time_stop():
     trades, _, _, _, _ = run_backtest({"X/USDT": feat}, cfg)
     t = trades.iloc[0]
     assert t["exit_reason"] == "time_stop"
-    assert t["exit_time"] == feat["timestamp"].iloc[6]  # entry bar 4 = 1st held bar
+    # entry bar 4 = 1st held bar; 3rd held bar close is bar 6 -> fill at bar 7 open
+    assert t["exit_time"] == feat["timestamp"].iloc[7]
+    assert t["exit_price"] == pytest.approx(feat["open"].iloc[7] * 0.9995)
 
 
 def test_equity_accounting_consistent():
@@ -202,8 +222,10 @@ def test_engine_no_lookahead():
 
     tf_, _, ef_, _, _ = run_backtest({"X/USDT": full}, cfg)
     tt, _, et, _, _ = run_backtest({"X/USDT": trunc}, cfg)
-    # every truncated trade (except forced end-of-data close) must appear identically in the full run
-    for _, tr in tt[tt["exit_reason"] != "end_of_data"].iterrows():
+    # every truncated trade that closed naturally (not end-of-data) must match the full run
+    natural = tt[(tt["exit_reason"] != "end_of_data")
+                 & ~tt["exit_reason"].str.endswith("_eod")]
+    for _, tr in natural.iterrows():
         m = tf_[(tf_["entry_time"] == tr["entry_time"]) & (tf_["exit_time"] == tr["exit_time"])]
         assert len(m) == 1
         pd.testing.assert_series_equal(m.iloc[0], tr)

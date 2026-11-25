@@ -23,6 +23,7 @@ backtest:
   initial_capital: 1000
   quote_currency: USDT
   fill_policy: next_bar_open     # v1: only supported policy
+  exit_fill: next_open           # close-based exits fill at next bar open (next_open | close)
   fee_pct: 0.10                  # placeholder per side - verify actual OKX tier
   slippage_pct: 0.05             # placeholder per side
   skip_cost_ratio: 0.20          # skip signal if round-trip cost % / stop distance % > this (0 = off)
@@ -50,7 +51,8 @@ futures:
   margin_mode: isolated          # v1: isolated only
   leverage: 2.0                  # placeholder - verify before any real use
   maintenance_margin_rate: 0.005 # simplified single-tier placeholder (OKX uses tiers)
-  funding_enabled: true          # applies only within OKX funding history (~3 months back)
+  funding_enabled: true          # real funding data (~3 months back) + fallback below
+  funding_fallback_rate_per_8h: 0.0001  # applied at 00/08/16 UTC where no real data exists
 
 
 

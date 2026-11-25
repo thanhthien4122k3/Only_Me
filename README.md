@@ -39,6 +39,7 @@ python run.py backtest --market all             # both + comparison -> results/<
 python run.py backtest --market spot --symbol BTC/USDT
 python run.py validate --market spot            # walk-forward + hold-out + Gate 1 -> results/gate1.md
 python run.py sweep --market spot --param risk.notional_cap=200,300,500
+python run.py compare-exits --market spot        # 4 fixed exit configs, ALL results -> results/compare_exits.csv
 python -m pytest tests/ -q                      # offline test suite
 ```
 

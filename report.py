@@ -113,11 +113,15 @@ METRIC_LABELS = {
     "expectancy_ci_90_lo": "CI 90% expectancy (cận dưới)",
     "expectancy_ci_90_hi": "CI 90% expectancy (cận trên)",
     "avg_holding_hours": "Thời gian giữ lệnh TB (giờ)",
+    "max_single_loss_pct_of_equity": "Lệnh thua lớn nhất (% vốn ban đầu)",
+    "realized_vs_planned_risk": "Thua thực tế / rủi ro dự kiến (lệnh thua)",
     "total_fees": "Tổng phí (USDT)",
     "total_slippage": "Tổng slippage (USDT)",
     "total_costs": "Tổng chi phí (USDT)",
     "costs_share_of_gross_profit_pct": "Chi phí / lợi nhuận gộp (%)",
     "total_funding": "Tổng funding (USDT)",
+    "funding_assumed_payments": "Funding giả định - thiếu dữ liệu (kỳ)",
+    "funding_assumed_usdt": "Funding giả định - thiếu dữ liệu (USDT)",
 }
 
 EXIT_REASONS = {
@@ -180,7 +184,8 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
     for k in ["n_trades", "n_wins", "n_losses", "win_rate_pct", "avg_win", "avg_loss",
               "largest_win", "largest_loss", "profit_factor", "expectancy_usdt",
               "expectancy_r", "expectancy_ci_90_lo", "expectancy_ci_90_hi",
-              "avg_holding_hours"]:
+              "avg_holding_hours", "max_single_loss_pct_of_equity",
+              "realized_vs_planned_risk"]:
         lines.append(f"| {METRIC_LABELS[k]} | {_fmt(metrics[k])} |")
     lines += ["", "## Chi phí", "", "| chỉ số | giá trị |", "|---|---|"]
     for k in ["total_fees", "total_slippage", "total_costs",
@@ -190,13 +195,19 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
         lines.append(f"| {METRIC_LABELS['total_funding']} | "
                      f"{_fmt(metrics.get('total_funding', 0.0))} |")
         if summary.get("funding_included"):
+            lines.append(f"| {METRIC_LABELS['funding_assumed_payments']} | "
+                         f"{summary.get('n_funding_fallback', 0)} kỳ |")
+            lines.append(f"| {METRIC_LABELS['funding_assumed_usdt']} | "
+                         f"{summary.get('funding_assumed_usdt', 0.0):.4f} |")
             lines.append("\nGhi chú funding: OKX chỉ cung cấp ~3 tháng lịch sử funding rate; "
-                         "phí funding CHỈ được tính trong khoảng dữ liệu có sẵn. Các giai đoạn "
-                         "trước đó không bao gồm funding. Giá mark tại thời điểm funding được "
-                         "xấp xỉ bằng giá đóng của cây nến 1H đóng đúng lúc funding.")
+                         "phí funding CHỈ được tính bằng dữ liệu thật trong khoảng có sẵn. "
+                         "Các kỳ funding (00/08/16 UTC) không có dữ liệu thật được áp dụng "
+                         "mức giả định fallback và ghi rõ là 'funding giả định - thiếu dữ "
+                         "liệu'. Giá mark tại thời điểm funding được xấp xỉ bằng giá đóng "
+                         "của cây nến 1H đóng đúng lúc funding.")
         else:
-            lines.append("\nCẢNH BÁO: thiếu dữ liệu funding hoặc funding bị tắt - đây KHÔNG "
-                         "phải là backtest futures đầy đủ (chưa bao gồm funding).")
+            lines.append("\nCẢNH BÁO: funding bị tắt - đây KHÔNG phải là backtest futures "
+                         "đầy đủ (chưa bao gồm funding).")
     lines += ["", "## Benchmark (mua và giữ, đã trừ 1 vòng phí)", "",
               "| cặp | lợi nhuận % |", "|---|---|"]
     for _, r in benchmarks.iterrows():
@@ -219,7 +230,10 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
         lines.append("_không có lệnh_")
     lines += ["", "## Lý do thoát lệnh", ""]
     for k, v in exit_counts.items():
-        lines.append(f"- {EXIT_REASONS.get(k, k)}: {v}")
+        label = EXIT_REASONS.get(k)
+        if label is None and k.endswith("_eod"):
+            label = EXIT_REASONS.get(k[:-4], k) + " (hết dữ liệu)"
+        lines.append(f"- {label or k}: {v}")
     lines += ["", "## Tín hiệu bị bỏ qua", ""]
     for k, v in skip_counts.items():
         lines.append(f"- {SKIP_REASONS.get(k, k)}: {v}")
@@ -235,7 +249,8 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
               "- Chỉ hỗ trợ market order khớp đủ; chưa có limit order, partial fill.",
               "- Vị thế còn mở khi hết dữ liệu bị đóng cưỡng bức tại giá đóng cuối "
               "(exit_reason=end_of_data).",
-              "- Không có funding (spot). Funding futures chỉ có dữ liệu ~3 tháng gần nhất.",
+              "- Không có funding (spot). Funding futures: dữ liệu thật chỉ ~3 tháng gần nhất, "
+              "các kỳ còn lại dùng mức giả định fallback (00/08/16 UTC).",
               "- fee_pct / slippage_pct là giá trị tạm: hãy kiểm tra mức phí OKX thực tế.",
               "- Quy tắc bỏ tín hiệu: bỏ khi chi phí round-trip % / khoảng cách stop % > "
               f"{cfg['backtest']['skip_cost_ratio']}."]

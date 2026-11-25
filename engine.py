@@ -49,6 +49,7 @@ class Position:
     highest_close: float = 0.0
     bars_held: int = 0
     exit_reason: str = ""
+    pending_exit: str = ""       # close-based exit decided; fills at next bar open
     position_id: str = ""
     leverage: float = 1.0
     initial_margin: float = 0.0
@@ -79,20 +80,26 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
     Signal on CLOSED bar t -> entry at bar t+1 OPEN (fill_policy=next_bar_open).
     Intrabar exits use the conservative rule: if stop and take-profit are both inside
     one candle, the STOP is assumed to hit first; an open below the stop fills at the open.
-    Close-based exits (time_stop, trailing, ema) fire at the bar close.
+    Close-based exits (time_stop, trailing, ema) are decided at the bar close and - with
+    backtest.exit_fill=next_open (default) - fill at the NEXT bar open; with exit_fill=close
+    they fill at the deciding bar's close (legacy). Stop/tp/gap/liquidation stay intrabar.
     Futures: liquidation (simplified isolated model) is checked before stop/tp;
     funding payments are applied at funding timestamps using the close of the bar
-    that closes at the funding time as the mark-price proxy.
+    that closes at the funding time as the mark-price proxy. Where no real funding data
+    exists, the fallback rate is applied at 00/08/16 UTC (counted separately as assumed).
     """
     validate_config(cfg)
     bt, rk, st = cfg["backtest"], cfg["risk"], cfg["stops"]
     sp = cfg.get("spot", {})
     fee = bt["fee_pct"] / 100.0
     slip = bt["slippage_pct"] / 100.0
+    exit_fill = bt.get("exit_fill", "next_open")
+    if exit_fill not in ("next_open", "close"):
+        raise ValueError("config.backtest.exit_fill must be 'next_open' or 'close'")
     is_futures = market_type == "futures"
 
     funding_enabled = False
-    funding_ptr, n_funding = {}, 0
+    fallback_rate = 0.0
     if is_futures:
         fu = cfg.get("futures") or {}
         lev = fu.get("leverage")
@@ -103,13 +110,8 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
             raise ValueError("config.futures.maintenance_margin_rate must be in (0, 1)")
         if contract_meta is None or any(s not in contract_meta for s in features_by_symbol):
             raise ValueError("contract_meta required for all futures symbols")
-        if funding_by_symbol:
-            for sym, fr in funding_by_symbol.items():
-                fr = fr.sort_values("ts").reset_index(drop=True)
-                fr["ts_ns"] = (fr["ts"] * 1_000_000).astype("int64")
-                funding_by_symbol[sym] = fr
-            funding_enabled = bool(fu.get("funding_enabled", True))
-            funding_ptr = {sym: 0 for sym in funding_by_symbol}
+        funding_enabled = bool(fu.get("funding_enabled", True))
+        fallback_rate = float(fu.get("funding_fallback_rate_per_8h", 0.0001))
         acc = futures_market.new_account(bt["initial_capital"])
     else:
         acc = spot_market.new_account(bt["initial_capital"])
@@ -125,6 +127,33 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
     timeline = sorted(set().union(*(f.index for f in frames.values())))
     positions, trades, orders, skipped, equity_rows = {}, [], [], [], []
     last_close, last_equity = {}, bt["initial_capital"]
+
+    # funding events per symbol: real downloaded rates + fallback at 00/08/16 UTC marks
+    funding_events, funding_ptr = {}, {}
+    n_funding = 0
+    n_funding_fallback = 0
+    fallback_usdt = 0.0
+    if funding_enabled:
+        H8 = 8 * 3_600_000
+        t0_ms = min(int(f.index.min().value) // 1_000_000 for f in frames.values())
+        t1_ms = max(int(f.index.max().value) // 1_000_000 for f in frames.values())
+        schedule = np.arange((t0_ms // H8) * H8, t1_ms + 1, H8)
+        fallback_on = fallback_rate > 0
+        for sym in frames:
+            real = (funding_by_symbol or {}).get(sym)
+            rate_map = {}
+            if real is not None and len(real):
+                rate_map = dict(zip(real["ts"].astype("int64"), real["rate"]))
+            rows = [{"ts_ns": int(t) * 1_000_000, "rate": float(r), "fallback": False}
+                    for t, r in rate_map.items()]
+            if fallback_on:
+                rows += [{"ts_ns": int(t) * 1_000_000, "rate": fallback_rate,
+                          "fallback": True}
+                         for t in schedule if t not in rate_map]
+            ev = pd.DataFrame(rows)
+            funding_events[sym] = (ev.sort_values("ts_ns").reset_index(drop=True)
+                                   if len(ev) else ev)
+        funding_ptr = {sym: 0 for sym in funding_events}
 
     tp_r = st.get("take_profit_r")
     time_stop = st.get("time_stop_bars")
@@ -176,12 +205,21 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
         if row["close"] > pos.highest_close:
             pos.highest_close = row["close"]
         if time_enabled and pos.bars_held >= time_stop:
-            return "time_stop", row["close"]
+            if exit_fill == "close":
+                return "time_stop", row["close"]
+            pos.pending_exit = "time_stop"
+            return None
         if (trailing_enabled and pd.notna(row["atr"])
                 and row["close"] <= pos.highest_close - trail_mult * row["atr"]):
-            return "trailing", row["close"]
+            if exit_fill == "close":
+                return "trailing", row["close"]
+            pos.pending_exit = "trailing"
+            return None
         if ema_enabled and row["exit_trend"]:
-            return "ema_exit", row["close"]
+            if exit_fill == "close":
+                return "ema_exit", row["close"]
+            pos.pending_exit = "ema_exit"
+            return None
         if trailing_enabled and pd.notna(row["atr"]):
             pos.current_stop_price = pos.highest_close - trail_mult * row["atr"]
         return None
@@ -191,17 +229,21 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
         # funding payments at funding timestamps inside (prev_ts, ts]
         if funding_enabled:
             ts_ns = ts.value
-            for sym, fr in funding_by_symbol.items():
+            for sym, ev in funding_events.items():
                 ptr = funding_ptr[sym]
-                while ptr < len(fr) and fr["ts_ns"].iloc[ptr] <= ts_ns:
+                while ptr < len(ev) and ev["ts_ns"].iloc[ptr] <= ts_ns:
                     pos = positions.get(sym)
-                    if fr["ts_ns"].iloc[ptr] > prev_ts_ns and pos is not None:
+                    if ev["ts_ns"].iloc[ptr] > prev_ts_ns and pos is not None:
                         # mark proxy = close of the bar that closes at the funding time
                         price = last_close.get(sym, pos.entry_price)
-                        payment = pos.quantity * price * float(fr["rate"].iloc[ptr])
+                        payment = pos.quantity * price * float(ev["rate"].iloc[ptr])
                         acc["cash"] -= payment
                         pos.funding_fee += payment
-                        n_funding += 1
+                        if bool(ev["fallback"].iloc[ptr]):
+                            n_funding_fallback += 1
+                            fallback_usdt += payment
+                        else:
+                            n_funding += 1
                     ptr += 1
                 funding_ptr[sym] = ptr
             prev_ts_ns = ts_ns
@@ -209,9 +251,16 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
         for sym in list(positions):
             if ts not in frames[sym].index:
                 continue  # no data: cannot evaluate, position kept (conservative)
-            res = check_bar(positions[sym], frames[sym].loc[ts])
+            row = frames[sym].loc[ts]
+            pos = positions[sym]
+            if pos.pending_exit:
+                # close-based exit decided at the previous bar close -> fill at this open
+                close_pos(pos, row["open"], ts, pos.pending_exit)
+                del positions[sym]
+                continue
+            res = check_bar(pos, row)
             if res:
-                close_pos(positions[sym], res[1], ts, res[0])
+                close_pos(pos, res[1], ts, res[0])
                 del positions[sym]
         # entries at this bar's open, from signals on the previous CLOSED bar
         candidates = []
@@ -310,7 +359,8 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
     # close anything still open at the last available close (flagged in exit_reason)
     n_forced = 0
     for sym, pos in list(positions.items()):
-        close_pos(pos, last_close.get(sym, pos.entry_price), timeline[-1], "end_of_data")
+        reason = pos.pending_exit + "_eod" if pos.pending_exit else "end_of_data"
+        close_pos(pos, last_close.get(sym, pos.entry_price), timeline[-1], reason)
         n_forced += 1
     if n_forced:
         equity_rows[-1] = {"timestamp": timeline[-1], "equity": acc["cash"],
@@ -334,6 +384,8 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
         "market_type": market_type,
         "funding_included": funding_enabled,
         "n_funding_payments": n_funding,
+        "n_funding_fallback": n_funding_fallback,
+        "funding_assumed_usdt": fallback_usdt,
         "initial_capital": bt["initial_capital"],
         "final_equity": final_equity,
         "net_profit": final_equity - bt["initial_capital"],

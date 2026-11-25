@@ -142,8 +142,21 @@ def compute_metrics(trades, orders, equity, cfg):
     m.update(trade_metrics(trades))
     if len(trades):
         lo, hi = bootstrap_expectancy_ci(trades["net_pnl"])
+        losses = trades[trades["net_pnl"] <= 0]
+        if len(losses):
+            # largest single loss relative to initial capital
+            m["max_single_loss_pct_of_equity"] = float(losses["net_pnl"].min()) / initial * 100
+            # mean of -net_pnl / planned_risk over losing trades
+            planned = losses["quantity"] * (losses["entry_price"] - losses["initial_stop_price"])
+            ratio = (-losses["net_pnl"] / planned.replace(0, np.nan)).dropna()
+            m["realized_vs_planned_risk"] = float(ratio.mean()) if len(ratio) else 0.0
+        else:
+            m["max_single_loss_pct_of_equity"] = 0.0
+            m["realized_vs_planned_risk"] = 0.0
     else:
         lo, hi = 0.0, 0.0
+        m["max_single_loss_pct_of_equity"] = 0.0
+        m["realized_vs_planned_risk"] = 0.0
     m["expectancy_ci_90_lo"], m["expectancy_ci_90_hi"] = lo, hi
     return m
 
