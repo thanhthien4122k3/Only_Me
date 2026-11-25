@@ -1,4 +1,5 @@
 """Public OKX spot OHLCV download via ccxt (no API key)."""
+import json
 from pathlib import Path
 import time
 
@@ -116,9 +117,114 @@ def quality_report(df, timeframe, since_ms, now_ms):
     }
 
 
-def load_ohlcv(symbol, timeframe, data_dir):
-    path = file_path(data_dir, symbol, timeframe)
+def load_ohlcv(symbol, timeframe, data_dir, market="spot"):
+    path = (futures_file_path(data_dir, symbol, timeframe) if market == "futures"
+            else file_path(data_dir, symbol, timeframe))
     df = pd.read_parquet(path)
     df = df.sort_values("ts").reset_index(drop=True)
     df["close_time"] = df["timestamp"] + pd.to_timedelta(TF_MS[timeframe], unit="ms")
     return df
+
+
+def futures_file_path(data_dir, symbol, timeframe):
+    name = symbol.replace("/", "-").replace(":", "-")
+    return Path(data_dir) / "futures" / f"{name}_{timeframe}.parquet"
+
+
+def funding_file_path(data_dir, symbol):
+    name = symbol.replace("/", "-").replace(":", "-")
+    return Path(data_dir) / "futures" / f"funding_{name}.parquet"
+
+
+def fetch_funding_history(exchange, symbol, since_ms, until_ms, limit=100):
+    """OKX serves only ~3 months of funding history back (verified Nov 2026)."""
+    out = []
+    cursor = since_ms
+    while cursor < until_ms:
+        batch = None
+        for attempt in range(3):
+            try:
+                batch = exchange.fetch_funding_rate_history(symbol, since=cursor, limit=limit)
+                break
+            except (ccxt.NetworkError, ccxt.RateLimitExceeded):
+                if attempt == 2:
+                    raise
+                time.sleep(2 + 2 * attempt)
+        if not batch:
+            break
+        out.extend(batch)
+        cursor = batch[-1]["timestamp"] + 1
+        if len(batch) < limit:
+            break
+    return out
+
+
+def funding_to_df(rows):
+    df = pd.DataFrame(rows)[["timestamp", "fundingRate"]]
+    df = df.rename(columns={"timestamp": "ts", "fundingRate": "rate"})
+    df = df.drop_duplicates(subset="ts", keep="last").sort_values("ts").reset_index(drop=True)
+    df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+    return df[["time", "ts", "rate"]]
+
+
+def fetch_instrument_meta(exchange, inst_ids):
+    """Normalized contract metadata from OKX public instruments (SWAP)."""
+    raw = exchange.publicGetPublicInstruments({"instType": "SWAP"})
+    out = {}
+    for r in raw.get("data", []):
+        if r["instId"] in inst_ids:
+            out[r["instId"]] = {
+                "instId": r["instId"],
+                "instType": r["instType"],
+                "ctVal": float(r["ctVal"]),
+                "ctValCcy": r["ctValCcy"],
+                "ctMult": float(r.get("ctMult") or 1),
+                "lotSz": float(r["lotSz"]),
+                "minSz": float(r["minSz"]),
+                "tickSz": float(r["tickSz"]),
+                "settleCcy": r["settleCcy"],
+            }
+    return out
+
+
+def download_futures(config):
+    """Swap OHLCV (1h/4h) + funding rates + instrument metadata -> data/futures/."""
+    exchange = make_exchange()
+    data_dir = config["data"]["dir"]
+    symbols = config["data"].get("futures_symbols",
+                                 [s + ":USDT" for s in config["data"]["symbols"]])
+    inst_ids = {f"{s.split('/')[0]}-{s.split('/')[1].split(':')[0]}-SWAP" for s in symbols}
+    meta = fetch_instrument_meta(exchange, inst_ids)
+    meta_path = Path(data_dir) / "futures" / "instruments.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    print(f"đã lưu {meta_path}: {sorted(meta)}")
+    for symbol in symbols:
+        for tf in ["1h", "4h"]:
+            now_ms = exchange.fetch_time()
+            months = config["data"]["months_back"]
+            since_ms = now_ms - int(months * 30.44 * 86_400_000)
+            since_ms -= since_ms % TF_MS[tf]
+            candles = fetch_range(exchange, symbol, tf, since_ms, now_ms)
+            df = candles_to_df(candles, tf, now_ms)
+            path = futures_file_path(data_dir, symbol, tf)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(path, index=False)
+            rep = quality_report(df, tf, since_ms, now_ms)
+            print(f"=== {path}: dòng={rep['rows']} đầu={rep['first']} cuối={rep['last']} "
+                  f"thiếu={rep['missing_bars']}")
+            for w in rep["warnings"]:
+                print(f"CẢNH BÁO: {w}")
+        now_ms = exchange.fetch_time()
+        months = config["data"]["months_back"]
+        since_ms = now_ms - int(months * 30.44 * 86_400_000)
+        rows = fetch_funding_history(exchange, symbol, since_ms, now_ms)
+        fdf = funding_to_df(rows)
+        fpath = funding_file_path(data_dir, symbol)
+        fdf.to_parquet(fpath, index=False)
+        print(f"=== {fpath}: dòng funding={len(fdf)} "
+              f"đầu={fdf['time'].iloc[0] if len(fdf) else None} "
+              f"cuối={fdf['time'].iloc[-1] if len(fdf) else None} "
+              f"(OKX chỉ có lịch sử funding ~3 tháng)")
+    return meta

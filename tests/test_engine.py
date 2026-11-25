@@ -1,0 +1,213 @@
+from copy import deepcopy
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from data import TF_MS, candles_to_df, load_config
+from engine import run_backtest, validate_config
+from strategy import build_features
+
+BASE = 1_700_000_000_000
+H1 = TF_MS["1h"]
+
+
+def make_cfg():
+    return {
+        "backtest": {"initial_capital": 1000.0, "fee_pct": 0.1, "slippage_pct": 0.05,
+                     "skip_cost_ratio": 0.2, "quote_currency": "USDT",
+                     "fill_policy": "next_bar_open"},
+        "spot": {"min_qty": 0.00001},
+        "risk": {"risk_pct": 0.5, "notional_cap": 300.0, "max_positions": 3,
+                 "stop_atr_mult": 1.5},
+        "stops": {"ema_exit_enabled": True, "initial_stop_enabled": True,
+                  "take_profit_r": None, "trailing_enabled": False,
+                  "trailing_atr_mult": 2.5, "time_stop_bars": None},
+    }
+
+
+def make_features(closes, signals=(), exit_trend=(), atr=2.0, adx=30.0,
+                  high_pad=1.0, low_pad=1.0, open_shift=0.0):
+    n = len(closes)
+    ts = [BASE + i * H1 for i in range(n)]
+    o = [c + open_shift for c in closes]
+    h = [c + high_pad for c in closes]
+    l = [c - low_pad for c in closes]
+    sig = [False] * n
+    for i in signals:
+        sig[i] = True
+    ext = [False] * n
+    for i in exit_trend:
+        ext[i] = True
+    return pd.DataFrame({
+        "timestamp": pd.to_datetime(ts, unit="ms", utc=True),
+        "open": o, "high": h, "low": l, "close": closes,
+        "atr": [atr] * n, "adx": [adx] * n,
+        "signal": sig, "exit_trend": ext,
+    })
+
+
+def test_entry_at_next_bar_open():
+    feat = make_features([100.0] * 10, signals=[3])
+    trades, orders, _, _, summary = run_backtest({"X/USDT": feat}, make_cfg())
+    assert summary["n_trades"] == 1
+    t = trades.iloc[0]
+    assert t["entry_time"] == feat["timestamp"].iloc[4]  # signal bar 3 -> open bar 4
+    assert t["entry_price"] == pytest.approx(feat["open"].iloc[4] * 1.0005)
+    buy = orders[(orders["side"] == "buy") & (orders["status"] == "FILLED")]
+    assert len(buy) == 1
+
+
+def test_stop_first_when_both_inside_candle():
+    cfg = make_cfg()
+    cfg["stops"]["take_profit_r"] = 2.0
+    feat = make_features([100.0] * 10, signals=[3])
+    feat.loc[5, "high"] = 110.0
+    feat.loc[5, "low"] = 95.0  # stop (~97.05) and tp (~106.05) both inside
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, cfg)
+    t = trades.iloc[0]
+    assert t["exit_reason"] == "stop_first"
+    assert t["exit_price"] == pytest.approx((t["entry_price"] - 1.5 * 2.0) * 0.9995)
+
+
+def test_gap_beyond_stop_fills_at_open():
+    cfg = make_cfg()
+    cfg["stops"]["take_profit_r"] = 2.0
+    feat = make_features([100.0] * 10, signals=[3])
+    feat.loc[5, "open"] = 90.0  # opens below the stop
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, cfg)
+    t = trades.iloc[0]
+    assert t["exit_reason"] == "gap_open"
+    assert t["exit_price"] == pytest.approx(90.0 * 0.9995)
+
+
+def test_ema_exit_at_close():
+    feat = make_features([100.0] * 10, signals=[3], exit_trend=[6])
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, make_cfg())
+    t = trades.iloc[0]
+    assert t["exit_reason"] == "ema_exit"
+    assert t["exit_time"] == feat["timestamp"].iloc[6]
+    assert t["exit_price"] == pytest.approx(100.0 * 0.9995)
+
+
+def test_time_stop():
+    cfg = make_cfg()
+    cfg["stops"]["time_stop_bars"] = 3
+    feat = make_features([100.0] * 20, signals=[3])
+    trades, _, _, _, _ = run_backtest({"X/USDT": feat}, cfg)
+    t = trades.iloc[0]
+    assert t["exit_reason"] == "time_stop"
+    assert t["exit_time"] == feat["timestamp"].iloc[6]  # entry bar 4 = 1st held bar
+
+
+def test_equity_accounting_consistent():
+    rng = np.random.default_rng(5)
+    closes = 100 + np.cumsum(rng.normal(0, 1, 200))
+    feat = make_features(closes, signals=[10, 50, 90], high_pad=2.0, low_pad=2.0)
+    trades, orders, equity, _, summary = run_backtest({"X/USDT": feat}, make_cfg())
+    assert summary["final_equity"] == pytest.approx(1000.0 + trades["net_pnl"].sum())
+    assert (equity["equity"] >= equity["cash"] - 1e-9).all()
+    assert equity["equity"].iloc[-1] == pytest.approx(equity["cash"].iloc[-1])
+    buys = orders[orders["side"] == "buy"]
+    sells = orders[orders["side"] == "sell"]
+    assert buys["qty"].sum() == pytest.approx(sells["qty"].sum())  # all closed
+
+
+def test_insufficient_balance_rejected():
+    cfg = make_cfg()
+    cfg["risk"]["risk_pct"] = 5000.0
+    cfg["risk"]["notional_cap"] = 1e9
+    feat = make_features([100.0] * 10, signals=[3])
+    trades, orders, _, _, summary = run_backtest({"X/USDT": feat}, cfg)
+    assert summary["n_trades"] == 0
+    rej = orders[orders["status"] == "REJECTED"]
+    assert len(rej) == 1
+    assert rej.iloc[0]["reason"] == "insufficient_balance"
+    assert summary["final_equity"] == pytest.approx(1000.0)
+
+
+def test_max_positions_and_adx_ranking():
+    cfg = make_cfg()
+    cfg["risk"]["max_positions"] = 2
+    frames = {
+        "A/USDT": make_features([100.0] * 10, signals=[3], adx=40.0),
+        "B/USDT": make_features([100.0] * 10, signals=[3], adx=30.0),
+        "C/USDT": make_features([100.0] * 10, signals=[3], adx=25.0),
+    }
+    trades, orders, _, skipped, summary = run_backtest(frames, cfg)
+    assert summary["n_trades"] == 2
+    entered = sorted(orders[orders["side"] == "buy"]["symbol"].tolist())
+    assert entered == ["A/USDT", "B/USDT"]
+    slot = skipped[skipped["reason"] == "slot_full"]
+    assert len(slot) == 1
+    assert slot.iloc[0]["symbol"] == "C/USDT"
+
+
+def test_no_pyramiding():
+    feat = make_features([100.0] * 10, signals=[3, 5])
+    trades, orders, _, _, summary = run_backtest({"X/USDT": feat}, make_cfg())
+    assert summary["n_trades"] == 1
+    assert len(orders[orders["side"] == "buy"]) == 1
+
+
+def test_skip_rule_cost_ratio():
+    feat = make_features([100.0] * 10, signals=[3], atr=0.05)  # tiny stop distance
+    trades, _, _, skipped, summary = run_backtest({"X/USDT": feat}, make_cfg())
+    assert summary["n_trades"] == 0
+    assert len(skipped[skipped["reason"] == "cost_ratio"]) == 1
+
+
+def test_validate_config_rejects_null_fee():
+    bad = make_cfg()
+    bad["backtest"]["fee_pct"] = None
+    with pytest.raises(ValueError):
+        validate_config(bad)
+
+
+def test_engine_no_lookahead():
+    cfg = load_config(str(Path(__file__).resolve().parent.parent / "config.yaml"))
+    n1 = 1500
+    now_ms = BASE + (n1 + 10) * H1
+    rng1 = np.random.default_rng(11)
+    c1 = 100 * np.exp(np.cumsum(rng1.normal(0.3, 0.8, n1)))
+    h1_ = c1 * (1 + rng1.uniform(0.001, 0.01, n1))
+    l1_ = c1 * (1 - rng1.uniform(0.001, 0.01, n1))
+    o1 = np.concatenate([[100.0], c1[:-1]])
+    v1 = rng1.uniform(800, 1200, n1)
+    v1[::23] *= 3
+    candles1 = [[BASE + i * H1, o, h, l, c, v]
+                for i, (o, h, l, c, v) in enumerate(zip(o1, h1_, l1_, c1, v1))]
+    rng4 = np.random.default_rng(12)
+    n4 = 400
+    c4 = 100 * np.exp(np.cumsum(rng4.normal(1.2, 1.6, n4)))
+    h4 = c4 * (1 + rng4.uniform(0.001, 0.01, n4))
+    l4 = c4 * (1 - rng4.uniform(0.001, 0.01, n4))
+    o4 = np.concatenate([[100.0], c4[:-1]])
+    v4 = rng4.uniform(800, 1200, n4)
+    candles4 = [[BASE + i * 4 * H1, o, h, l, c, v]
+                for i, (o, h, l, c, v) in enumerate(zip(o4, h4, l4, c4, v4))]
+
+    def frame(candles, tf):
+        d = candles_to_df(candles, tf, now_ms)
+        d["close_time"] = d["timestamp"] + pd.to_timedelta(TF_MS[tf], unit="ms")
+        return d
+
+    df1 = frame(candles1, "1h")
+    df4 = frame(candles4, "4h")
+    full = build_features(df1, df4, cfg)
+    T = full["close_time"].iloc[1200]
+    trunc = build_features(df1[df1["close_time"] <= T].reset_index(drop=True),
+                           df4[df4["close_time"] <= T].reset_index(drop=True), cfg)
+
+    tf_, _, ef_, _, _ = run_backtest({"X/USDT": full}, cfg)
+    tt, _, et, _, _ = run_backtest({"X/USDT": trunc}, cfg)
+    # every truncated trade (except forced end-of-data close) must appear identically in the full run
+    for _, tr in tt[tt["exit_reason"] != "end_of_data"].iterrows():
+        m = tf_[(tf_["entry_time"] == tr["entry_time"]) & (tf_["exit_time"] == tr["exit_time"])]
+        assert len(m) == 1
+        pd.testing.assert_series_equal(m.iloc[0], tr)
+    last_ts = et["timestamp"].iloc[-1]
+    # exclude the last truncated row: it is overwritten by the end-of-data force close
+    pd.testing.assert_frame_equal(et.iloc[:-1].reset_index(drop=True),
+                                  ef_[ef_["timestamp"] < last_ts].reset_index(drop=True))

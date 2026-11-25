@@ -1,5 +1,6 @@
 data:
   symbols: ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+  futures_symbols: ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
   timeframes: ["1h", "4h"]
   months_back: 25
   dir: "data"
@@ -17,4 +18,39 @@ strategy:
   breakout_period: 20
   volume_sma: 20
   volume_mult: 1.2
+
+backtest:
+  initial_capital: 1000
+  quote_currency: USDT
+  fill_policy: next_bar_open     # v1: only supported policy
+  fee_pct: 0.10                  # placeholder per side - verify actual OKX tier
+  slippage_pct: 0.05             # placeholder per side
+  skip_cost_ratio: 0.20          # skip signal if round-trip cost % / stop distance % > this (0 = off)
+
+spot:
+  min_qty: 0.00001               # placeholder min order qty (BTC/USDT grid) - verify per symbol
+
+risk:
+  risk_pct: 0.5                  # % of current equity per trade
+  notional_cap: 300              # USDT max per position
+  max_positions: 3
+  stop_atr_mult: 1.5             # reference stop = entry - mult*ATR (sizing + optional stop)
+
+stops:
+  ema_exit_enabled: true         # baseline exit: EMA20 < EMA50 at bar close
+  initial_stop_enabled: false    # enforce the ATR stop intrabar
+  take_profit_r: null            # e.g. 2.0 -> tp = entry + R*stop_distance (null = off)
+  trailing_enabled: false
+  trailing_atr_mult: 2.5
+  time_stop_bars: null           # e.g. 24 -> exit at close after N bars held (null = off)
+
+futures:
+  enabled: true
+  instrument_type: SWAP
+  margin_mode: isolated          # v1: isolated only
+  leverage: 2.0                  # placeholder - verify before any real use
+  maintenance_margin_rate: 0.005 # simplified single-tier placeholder (OKX uses tiers)
+  funding_enabled: true          # applies only within OKX funding history (~3 months back)
+
+
 
