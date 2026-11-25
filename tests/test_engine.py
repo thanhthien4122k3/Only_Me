@@ -225,8 +225,38 @@ def test_open_at_end_flag_with_execution_end():
     assert bool(t["open_at_end"])
     assert t["exit_reason"] == "open_at_end"
     assert t["exit_time"] is None
-    assert t["net_pnl"] == 0.0
+    # mark = close 100 -> unrealized = (100 - entry) * qty, net = unrealized - entry_fee
+    assert t["unrealized_pnl"] == pytest.approx((100.0 - t["entry_price"]) * t["quantity"])
+    assert t["net_pnl"] == pytest.approx(t["unrealized_pnl"] - t["entry_fee"])
     assert summary["n_open_at_end"] == 1
+
+
+def test_open_at_end_unrealized_loss_and_final_equity_matches_curve():
+    cfg = make_cfg()
+    cfg["stops"]["initial_stop_enabled"] = False  # giữ vị thế mở tới execution_end
+    closes = [100.0, 100.0, 100.0, 100.0, 100.0, 95.0, 92.0, 90.0, 88.0, 85.0]
+    feat = make_features(closes, signals=[3])
+    end = feat["timestamp"].iloc[8]
+    trades, _, equity, _, summary = run_backtest({"X/USDT": feat}, cfg, execution_end=end)
+    t = trades.iloc[0]
+    assert bool(t["open_at_end"])
+    assert t["net_pnl"] < 0  # unrealized loss
+    assert t["net_pnl"] == pytest.approx((closes[8] - t["entry_price"]) * t["quantity"]
+                                         - t["entry_fee"])
+    assert summary["final_equity"] == pytest.approx(equity["equity"].iloc[-1])
+
+
+def test_closed_trades_unaffected_by_execution_end():
+    cfg = make_cfg()  # stops on
+    closes = [100.0] * 5 + [90.0, 89.0, 88.0, 87.0, 86.0]
+    feat = make_features(closes, signals=[3])
+    end = feat["timestamp"].iloc[6]
+    t1 = run_backtest({"X/USDT": feat}, cfg, execution_end=end)[0].iloc[0]
+    t2 = run_backtest({"X/USDT": feat}, cfg)[0].iloc[0]
+    assert t1["exit_reason"] == "gap_open"  # đóng trong cửa sổ, trước end
+    assert t1["unrealized_pnl"] == 0.0
+    for col in ["entry_time", "entry_price", "exit_time", "exit_price", "net_pnl"]:
+        assert t1[col] == t2[col]
 
 
 def test_fees_by_market():

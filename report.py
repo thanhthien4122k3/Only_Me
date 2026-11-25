@@ -95,6 +95,7 @@ METRIC_LABELS = {
     "final_equity": "Vốn cuối kỳ (USDT)",
     "net_profit": "Lợi nhuận ròng (USDT)",
     "net_return_pct": "Lợi nhuận ròng (%)",
+    "net_return_incl_open_pct": "Lợi nhuận ròng gồm vị thế mở (%)",
     "max_drawdown_usdt": "Drawdown tối đa (USDT)",
     "max_drawdown_pct": "Drawdown tối đa (%)",
     "sharpe_ratio": "Sharpe ratio",
@@ -117,6 +118,8 @@ METRIC_LABELS = {
     "avg_holding_hours": "Thời gian giữ lệnh TB (giờ)",
     "max_single_loss_pct_of_equity": "Lệnh thua lớn nhất (% vốn ban đầu)",
     "realized_vs_planned_risk": "Thua thực tế / rủi ro dự kiến (lệnh thua)",
+    "net_pnl_excl_top3": "PnL ròng không tính 3 lệnh thắng lớn nhất (USDT)",
+    "top3_share_pct": "Tỷ trọng 3 lệnh thắng lớn nhất trong PnL (%)",
     "total_fees": "Tổng phí (USDT)",
     "total_slippage": "Tổng slippage (USDT)",
     "total_costs": "Tổng chi phí (USDT)",
@@ -185,6 +188,7 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
              "## Chỉ số danh mục", "",
              "| chỉ số | giá trị |", "|---|---|"]
     for k in ["initial_capital", "final_equity", "net_profit", "net_return_pct",
+              "net_return_incl_open_pct",
               "max_drawdown_usdt", "max_drawdown_pct", "sharpe_ratio", "sortino_ratio",
               "exposure_time_pct", "avg_exposure_pct"]:
         lines.append(f"| {METRIC_LABELS[k]} | {_fmt(metrics[k])} |")
@@ -193,7 +197,7 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
               "largest_win", "largest_loss", "profit_factor", "expectancy_usdt",
               "expectancy_r", "expectancy_ci_90_lo", "expectancy_ci_90_hi",
               "avg_holding_hours", "max_single_loss_pct_of_equity",
-              "realized_vs_planned_risk"]:
+              "realized_vs_planned_risk", "net_pnl_excl_top3", "top3_share_pct"]:
         lines.append(f"| {METRIC_LABELS[k]} | {_fmt(metrics[k])} |")
     lines += ["", "## Chi phí", "", "| chỉ số | giá trị |", "|---|---|"]
     for k in ["total_fees", "total_slippage", "total_costs",
@@ -220,17 +224,19 @@ def write_report(cfg, trades, orders, equity, skipped, summary, metrics, benchma
               "| cặp | lợi nhuận % |", "|---|---|"]
     for _, r in benchmarks.iterrows():
         lines.append(f"| {r['symbol']} | {r['buy_hold_ret_pct']:.2f} |")
-    lines += ["", "## Theo cặp giao dịch", ""]
-    if len(trades):
-        bs = by_symbol(trades).rename(columns={
+    closed = (trades[~trades["open_at_end"]]
+              if len(trades) and "open_at_end" in trades.columns else trades)
+    lines += ["", "## Theo cặp giao dịch (lệnh đã đóng)", ""]
+    if len(closed):
+        bs = by_symbol(closed).rename(columns={
             "symbol": "cặp", "n_trades": "số lệnh",
             "net_pnl": "PnL ròng (USDT)", "win_rate_pct": "tỷ lệ thắng (%)"})
         lines.append(_md_table(bs))
     else:
         lines.append("_không có lệnh_")
-    lines += ["", "## Theo quý (tính theo thời điểm thoát lệnh)", ""]
-    if len(trades):
-        bq = by_quarter(trades).rename(columns={
+    lines += ["", "## Theo quý (tính theo thời điểm thoát lệnh, lệnh đã đóng)", ""]
+    if len(closed):
+        bq = by_quarter(closed).rename(columns={
             "quarter": "quý", "n_trades": "số lệnh",
             "net_pnl": "PnL ròng (USDT)", "win_rate_pct": "tỷ lệ thắng (%)"})
         lines.append(_md_table(bq))

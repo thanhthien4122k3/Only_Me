@@ -106,6 +106,22 @@ def test_compute_metrics_end_to_end():
     assert m["realized_vs_planned_risk"] == pytest.approx(4.0 / 3.0)
 
 
+def test_concentration_metrics():
+    trades = make_trades([10.0, -5.0, 2.0, 1.0])
+    orders = pd.DataFrame()
+    eq = pd.DataFrame({
+        "timestamp": pd.to_datetime([BASE, BASE + 3_600_000], unit="ms", utc=True),
+        "equity": [1000.0, 1008.0],
+        "cash": [1000.0, 1008.0],
+        "exposure_pct": [0.0, 0.0],
+    })
+    cfg = {"backtest": {"initial_capital": 1000.0, "fee_pct": 0.1, "slippage_pct": 0.05}}
+    m = compute_metrics(trades, orders, eq, cfg)
+    # top3 = 10 + 2 + 1 = 13; total = 8 -> excl = -5; share = 162.5%
+    assert m["net_pnl_excl_top3"] == pytest.approx(-5.0)
+    assert m["top3_share_pct"] == pytest.approx(13.0 / 8.0 * 100)
+
+
 def test_empty_trades_no_crash():
     trades = pd.DataFrame()
     orders = pd.DataFrame()

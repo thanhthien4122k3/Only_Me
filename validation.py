@@ -63,9 +63,9 @@ def walk_forward(frames_by_symbol, cfg, market_type="spot", window_months=3,
 
 def hold_out(frames_by_symbol, cfg, market_type="spot", pct=0.20, **engine_kwargs):
     """Evaluate the last pct of the timeline ONCE: capital starts fresh at the split and
-    only bars before the split serve as warm-up. Positions still open at the end are
-    marked to market and reported open (open_at_end flag); metrics exclude them but
-    report their count. Returns (metrics, split_ts, summary)."""
+    only bars before the split serve as warm-up. No execution_end is passed, so positions
+    still open at the end of data are FORCE-CLOSED at the last close (exit_reason
+    end_of_data). Returns (metrics, split_ts, summary)."""
     ts = _timeline(frames_by_symbol)
     split = ts.iloc[int(len(ts) * (1 - pct))]
     trades, orders, equity, skipped, summary = run_backtest(
@@ -156,6 +156,48 @@ def compare_exits(frames_by_symbol, cfg, market_type="spot", **engine_kwargs):
             "total costs": round(m["total_costs"], 2),
         })
     return pd.DataFrame(rows)
+
+
+def cost_sensitivity(frames_by_symbol, cfg, market_type="spot", **engine_kwargs):
+    """Config B (ema_exit + initial_stop) over fee x slippage grids. ALL 12 rows are
+    returned/printed; nothing is selected automatically."""
+    fee_grid = [0.05, 0.08, 0.10, 0.15]
+    slip_grid = [0.02, 0.05, 0.10]
+    fee_key = "fee_pct_futures" if market_type == "futures" else "fee_pct_spot"
+    rows = []
+    for fee_v in fee_grid:
+        for slip_v in slip_grid:
+            c = deepcopy(cfg)
+            c["stops"].update({"ema_exit_enabled": True, "initial_stop_enabled": True,
+                               "take_profit_r": None, "trailing_enabled": False,
+                               "trailing_atr_mult": 2.5, "time_stop_bars": None})
+            c["backtest"][fee_key] = fee_v
+            c["backtest"]["slippage_pct"] = slip_v
+            trades, orders, equity, skipped, summary = run_backtest(
+                frames_by_symbol, c, market_type=market_type, **engine_kwargs)
+            m = compute_metrics(trades, orders, equity, c)
+            pf = m["profit_factor"]
+            rows.append({
+                "fee": fee_v,
+                "slippage": slip_v,
+                "trades": m["n_trades"],
+                "PF": round(pf, 3) if np.isfinite(pf) else "inf",
+                "expectancy USDT": round(m["expectancy_usdt"], 4),
+                "net return %": round(m["net_return_pct"], 2),
+                "max drawdown %": round(m["max_drawdown_pct"], 2),
+                "expectancy CI90 low": round(m["expectancy_ci_90_lo"], 4),
+            })
+    return pd.DataFrame(rows)
+
+
+def break_even_cost(df):
+    """Highest cost scenario (fee+slippage) where expectancy is still > 0."""
+    pos = df[df["expectancy USDT"] > 0]
+    if len(pos) == 0:
+        return "không có kịch bản chi phí nào có expectancy > 0"
+    best = pos.loc[(pos["fee"] + pos["slippage"]).idxmax()]
+    return (f"break-even cost (approx): fee={best['fee']}% + slippage={best['slippage']}% "
+            f"(expectancy {best['expectancy USDT']:.4f} USDT)")
 
 
 def param_sweep(frames_by_symbol, cfg, param_lists, market_type="spot", **engine_kwargs):

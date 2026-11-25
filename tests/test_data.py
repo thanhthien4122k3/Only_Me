@@ -1,6 +1,7 @@
 import pandas as pd
 
-from data import candles_to_df, check_data, check_features, load_ohlcv, quality_report
+from data import (candles_to_df, check_data, check_features, is_excluded_base,
+                  load_ohlcv, quality_report)
 
 TF_MS = {"1h": 3_600_000, "4h": 14_400_000}
 
@@ -67,6 +68,17 @@ def test_gate_warns_not_critical():
 def test_gate_clean_data_no_issues():
     df = make_gate_df(1000)
     assert check_data(df, "1h", CFG_SHORT) == []
+
+
+def test_universe_exclusions():
+    assert is_excluded_base("USDC") is True
+    assert is_excluded_base("BTC3L") is True
+    assert is_excluded_base("5LONG") is False  # chỉ loại prefix 2X/3X/5X/10X
+    assert is_excluded_base("XTBULL") is True
+    assert is_excluded_base("WBTC") is True
+    assert is_excluded_base("STETH") is True
+    assert is_excluded_base("DOGE") is False
+    assert is_excluded_base("ETH") is False
 
 
 def test_gate_feature_nan_critical():

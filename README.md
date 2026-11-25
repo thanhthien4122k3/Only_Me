@@ -41,6 +41,8 @@ python run.py validate --market spot            # walk-forward + hold-out + Gate
 python run.py sweep --market spot --param risk.notional_cap=200,300,500
 python run.py compare-exits --market spot        # 4 fixed exit configs, ALL results -> results/compare_exits.csv
 python run.py snapshot --label <ten>              # spot config B headline metrics -> results/snapshot_<ten>.csv
+python run.py cost-sensitivity --market spot       # config B x fee/slippage grids (12 rows, ALL printed)
+python run.py pick-universe                        # OKX spot USDT pairs by 24h volume (no config edit)
 python -m pytest tests/ -q                      # offline test suite
 ```
 
@@ -85,20 +87,32 @@ compare.md               (only for --market all) side-by-side spot vs futures
   against its own SMA, so units do not matter.
 - Funding history: ~3 months back only (277 x 8h payments downloaded per symbol).
 
-## Current results (default config, 2024-10-24 .. 2026-11-24, net of costs)
+## Current results (config B: ema_exit + ATR stop, spot, 2024-10-24 .. 2026-11-24)
 
-| | spot | futures |
-|---|---|---|
-| net return | +5.95% | +2.29% |
-| trades | 58 | 45 |
-| win rate | 29.3% | 33.3% |
-| profit factor | 1.15 | 1.09 |
-| max drawdown | 13.9% | 14.6% |
-| benchmark B&H (equal-weight) | -35.5% | -35.8% |
+Sinh ngày: 2026-11-25. Git commit: n/a (git không được cài trên máy này). Mọi số liệu
+đều sau chi phí (fee 0.10% + slippage 0.05% placeholder mỗi chiều).
 
-Gate 1 (spot): hold-out PF 2.14 PASS, expectancy +1.03 PASS, >=100 trades FAIL (58),
-maxDD <= 5% FAIL (13.9%), PF > 1 in >= 60% WF windows FAIL (56%, 5/9). **The strategy
-does not pass Gate 1 in its current configuration.**
+| chỉ số | giá trị |
+|---|---|
+| net return | +5.16% |
+| trades | 73 |
+| win rate | 19.2% |
+| profit factor | 1.156 |
+| expectancy (USDT/lệnh) | 0.7064 |
+| expectancy CI 90% (cận dưới) | -2.13 |
+| max drawdown | 13.51% |
+| benchmark B&H equal-weight | -35.51% |
+
+Gate 1 (config B): hold-out PF 1.407 PASS, expectancy +0.706 PASS, >=100 lệnh FAIL (73),
+maxDD <= 5% FAIL (13.51%), PF > 1 trong >= 60% cửa sổ WF FAIL (44%, 4/9).
+**Chiến lược chưa qua Gate 1 với cấu hình hiện tại.**
+
+## Stop rule (bắt buộc trước khi live)
+
+**KHÔNG live trading** trừ khi cận dưới CI 90% của expectancy > 0 VÀ profit factor > 1.2,
+tính với mức phí thực tế (đã verify tier OKX) trên universe đã mở rộng (8-10 cặp chọn qua
+`pick-universe`). Hiện tại CI90 low = -2.13 và PF = 1.156 với phí placeholder -> chưa đủ
+điều kiện live.
 
 ## Layout
 
@@ -132,10 +146,14 @@ lỗ thực tế so với rủi ro dự kiến là bao nhiêu.
 - Các bar trước `execution_start` chỉ là **warm-up** (tính indicator), không entry, không
   exit; vốn bắt đầu mới tại `execution_start`.
 - Tín hiệu trên nến warm-up cuối cùng được phép khớp tại open của nến đầu tiên >= start.
-- Khi có `execution_end`: vị thế còn mở được mark-to-market và báo OPEN (cờ `open_at_end`),
-  **không force-close**; metrics loại chúng ra nhưng báo số lượng.
+- Khi có `execution_end`: vị thế còn mở được mark-to-market và báo OPEN (cờ `open_at_end`,
+  `net_pnl` = unrealized trừ entry fee), **không force-close**; metrics PF/win-rate loại
+  chúng ra nhưng báo số lượng (`n_open_at_end`).
 - Walk-forward hiện là **1 lần chạy liên tục** toàn bộ dữ liệu, gán lệnh vào cửa sổ 3 tháng
   theo entry_time. Hold-out chạy với `execution_start` = điểm chia 80/20 (vốn mới tại đó).
+  Lưu ý: lệnh `hold_out` KHÔNG truyền `execution_end`, nên vị thế còn mở ở cuối dữ liệu bị
+  **force-close tại giá đóng cuối** với `exit_reason=end_of_data` (cờ `open_at_end` chỉ
+  xuất hiện khi gọi engine trực tiếp với `execution_end`).
 
 ### (c) Official vs EXPLORATORY run
 `backtest` / `validate` chạy **data quality gate** trước: lỗi CRITICAL (ts trùng/lộn xộn,

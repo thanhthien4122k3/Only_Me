@@ -1,0 +1,1 @@
+symbol,market_type,direction,entry_time,entry_price,quantity,notional_value,initial_stop_price,current_stop_price,exit_time,exit_price,entry_fee,exit_fee,funding_fee,realized_pnl,unrealized_pnl,net_pnl,status,highest_close,bars_held,exit_reason,pending_exit,open_at_end,position_id,leverage,initial_margin,liq_price

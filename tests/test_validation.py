@@ -3,8 +3,9 @@ import pandas as pd
 import pytest
 
 from data import TF_MS
-from validation import (compare_exits, gate1_checklist, hold_out, param_sweep,
-                        walk_forward, window_metrics)
+from validation import (break_even_cost, compare_exits, cost_sensitivity,
+                        gate1_checklist, hold_out, param_sweep, walk_forward,
+                        window_metrics)
 
 BASE = 1_700_000_000_000
 H1 = TF_MS["1h"]
@@ -124,6 +125,28 @@ def test_compare_exits_runs_all_4():
                 "max drawdown %", "max_single_loss_pct_of_equity",
                 "realized_vs_planned_risk", "total costs"]:
         assert col in df.columns
+
+
+def test_cost_sensitivity_12_rows_and_grid():
+    cfg = make_cfg()
+    frames = {"X/USDT": with_signals(make_features(1500))}
+    df = cost_sensitivity(frames, cfg)
+    assert len(df) == 12
+    assert set(zip(df["fee"], df["slippage"])) == {
+        (f, s) for f in [0.05, 0.08, 0.10, 0.15] for s in [0.02, 0.05, 0.10]}
+    for col in ["trades", "PF", "expectancy USDT", "net return %",
+                "max drawdown %", "expectancy CI90 low"]:
+        assert col in df.columns
+    assert cfg["backtest"]["fee_pct"] == 0.1  # config gốc không bị đổi
+
+
+def test_break_even_cost_line():
+    df = pd.DataFrame({"fee": [0.05, 0.15], "slippage": [0.02, 0.10],
+                       "expectancy USDT": [1.0, -0.5]})
+    assert "fee=0.05" in break_even_cost(df)
+    all_neg = pd.DataFrame({"fee": [0.15], "slippage": [0.10],
+                            "expectancy USDT": [-1.0]})
+    assert "không có kịch bản" in break_even_cost(all_neg)
 
 
 def test_param_sweep_returns_all_combos():

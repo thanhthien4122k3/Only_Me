@@ -114,10 +114,14 @@ def compute_metrics(trades, orders, equity, cfg):
     bt = cfg["backtest"]
     initial = bt["initial_capital"]
     final = float(equity["equity"].iloc[-1]) if len(equity) else initial
+    closed = (trades[~trades["open_at_end"]]
+              if len(trades) and "open_at_end" in trades.columns else trades)
+    closed_pnl = float(closed["net_pnl"].sum()) if len(closed) else 0.0
     m = {"initial_capital": initial,
          "final_equity": final,
          "net_profit": final - initial,
-         "net_return_pct": (final / initial - 1) * 100}
+         "net_return_pct": closed_pnl / initial * 100,       # lệnh đã đóng
+         "net_return_incl_open_pct": (final / initial - 1) * 100}  # theo equity curve
     if len(equity):
         mdd, mdd_pct = max_drawdown(equity["equity"])
         m["max_drawdown_usdt"] = -mdd
@@ -136,13 +140,13 @@ def compute_metrics(trades, orders, equity, cfg):
     m["total_costs"] = fees + slip
     m["total_funding"] = (float(trades["funding_fee"].sum())
                           if len(trades) and "funding_fee" in trades.columns else 0.0)
-    # gross profit = realized pnl (after slippage, before fees) of winning trades
-    gross = float(trades[trades["realized_pnl"] > 0]["realized_pnl"].sum()) if len(trades) else 0.0
+    # gross profit = realized pnl (after slippage, before fees) of winning CLOSED trades
+    gross = float(closed[closed["realized_pnl"] > 0]["realized_pnl"].sum()) if len(closed) else 0.0
     m["costs_share_of_gross_profit_pct"] = (fees + slip) / gross * 100 if gross > 0 else 0.0
-    m.update(trade_metrics(trades))
-    if len(trades):
-        lo, hi = bootstrap_expectancy_ci(trades["net_pnl"])
-        losses = trades[trades["net_pnl"] <= 0]
+    m.update(trade_metrics(closed))
+    if len(closed):
+        lo, hi = bootstrap_expectancy_ci(closed["net_pnl"])
+        losses = closed[closed["net_pnl"] <= 0]
         if len(losses):
             # largest single loss relative to initial capital
             m["max_single_loss_pct_of_equity"] = float(losses["net_pnl"].min()) / initial * 100
@@ -157,6 +161,14 @@ def compute_metrics(trades, orders, equity, cfg):
         lo, hi = 0.0, 0.0
         m["max_single_loss_pct_of_equity"] = 0.0
         m["realized_vs_planned_risk"] = 0.0
+    if len(closed):
+        pnl = closed["net_pnl"]
+        top3 = pnl.nlargest(3).sum()
+        m["net_pnl_excl_top3"] = float(pnl.sum() - top3)
+        m["top3_share_pct"] = (float(top3 / pnl.sum() * 100) if pnl.sum() != 0 else 0.0)
+    else:
+        m["net_pnl_excl_top3"] = 0.0
+        m["top3_share_pct"] = 0.0
     m["expectancy_ci_90_lo"], m["expectancy_ci_90_hi"] = lo, hi
     return m
 

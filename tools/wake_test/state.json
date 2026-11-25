@@ -1,0 +1,7 @@
+﻿{
+    "task_name":  "PaperWakeTest",
+    "started_at":  "2026-11-25T22:28:20.7787637+07:00",
+    "wake_at":  "2026-11-25T22:31:20.6675415+07:00",
+    "marker_file":  "E:\\VS_Code\\okx-trend-backtest\\paper\\wake_test.txt",
+    "no_sleep":  false
+}

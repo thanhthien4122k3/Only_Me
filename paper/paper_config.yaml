@@ -1,0 +1,16 @@
+# Paper trading override - merge LÊN config.yaml (config.yaml KHÔNG bị sửa).
+# Mọi mức phí/slippage ở đây là GIẢ ĐỊNH cho tới khi xác nhận tier OKX thật.
+risk:
+  risk_pct: 1.0
+  notional_cap: 300
+  max_positions: 3
+
+stops:
+  ema_exit_enabled: true
+  initial_stop_enabled: true   # bản chính: BẬT ATR stop
+  take_profit_r: null
+  trailing_enabled: false
+  time_stop_bars: null
+
+futures:
+  leverage: 2.0                # không đặt 5x

@@ -44,6 +44,7 @@ class Position:
     exit_fee: float = 0.0
     funding_fee: float = 0.0
     realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0   # only set for open_at_end rows (mark - entry) * qty
     net_pnl: float = 0.0
     status: str = "open"         # "open" | "closed"
     highest_close: float = 0.0
@@ -382,13 +383,16 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
                               pos.pending_exit + "_eod")
                     n_forced += 1
                 else:
-                    # marked to market, reported open (not force-closed)
+                    # marked to market, reported open (not force-closed);
+                    # net_pnl carries the unrealized PnL net of entry fee
+                    mark = last_close.get(sym, pos.entry_price)
                     pos.open_at_end = True
-                    pos.exit_price = last_close.get(sym, pos.entry_price)
+                    pos.exit_price = mark
                     pos.exit_reason = "open_at_end"
                     pos.status = "open"
                     pos.realized_pnl = 0.0
-                    pos.net_pnl = 0.0
+                    pos.unrealized_pnl = (mark - pos.entry_price) * pos.quantity
+                    pos.net_pnl = pos.unrealized_pnl - pos.entry_fee
                     trades.append(pos)
                     n_open += 1
         else:
@@ -413,7 +417,7 @@ def run_backtest(features_by_symbol, cfg, market_type="spot", funding_by_symbol=
     equity_df = pd.DataFrame(equity_rows)
     skipped_df = (pd.DataFrame(skipped, columns=["symbol", "time", "reason"])
                   if skipped else pd.DataFrame(columns=["symbol", "time", "reason"]))
-    final_equity = acc["cash"]
+    final_equity = float(equity_rows[-1]["equity"]) if equity_rows else acc["cash"]
     summary = {
         "market_type": market_type,
         "funding_included": funding_enabled,

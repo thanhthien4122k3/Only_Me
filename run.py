@@ -11,14 +11,16 @@ from pathlib import Path
 import pandas as pd
 
 from data import (check_data, check_features, download_futures, download_one,
-                  file_path, funding_file_path, futures_file_path, load_config,
-                  load_ohlcv, make_exchange, quality_report)
+                  file_path, fetch_spot_usdt_tickers, first_candle_ts,
+                  funding_file_path, futures_file_path, load_config, load_ohlcv,
+                  make_exchange, quality_report)
 from engine import run_backtest, validate_config
 from metrics import compute_benchmarks, compute_metrics
 from report import (compare_markets, make_run_id, write_compare, write_report,
                     write_run_metadata)
 from strategy import FEATURE_COLS, build_features, funnel
-from validation import compare_exits, gate1_checklist, hold_out, param_sweep, walk_forward
+from validation import (break_even_cost, compare_exits, cost_sensitivity,
+                        gate1_checklist, hold_out, param_sweep, walk_forward)
 
 
 def cmd_download(config, args):
@@ -293,6 +295,54 @@ def cmd_compare_exits(config, args):
           "độ ổn định, sau đó xác nhận lại bằng walk-forward.")
 
 
+def cmd_cost_sensitivity(config, args):
+    if args.market == "all":
+        print("cost-sensitivity hỗ trợ từng market riêng: spot hoặc futures.")
+        sys.exit(2)
+    frames, ekw, _, _ = _ctx(config, args.symbol, args.market)
+    df = cost_sensitivity(frames, config, market_type=args.market, **ekw)
+    print("\n=== Cost sensitivity (config B: ema_exit + ATR stop, in TẤT CẢ 12 dòng) ===")
+    print(df.to_string(index=False))
+    out = Path("results")
+    out.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out / "cost_sensitivity.csv", index=False)
+    print("đã lưu results/cost_sensitivity.csv")
+    print(break_even_cost(df))
+
+
+def cmd_pick_universe(config):
+    """Public OKX tickers: spot USDT pairs by 24h quote volume with exclusions.
+    Không tự sửa config - bạn chọn 8-10 cặp và điền vào config.yaml."""
+    exchange = make_exchange()
+    months_needed = config["data"]["months_back"]
+    candidates = fetch_spot_usdt_tickers(exchange)
+    print(f"Top {len(candidates)} cặp spot USDT theo volume 24h (đã loại stablecoin, "
+          f"wrapped/leveraged)...")
+    now_ms = exchange.milliseconds()
+    probe_since = now_ms - int((months_needed + 1) * 30.44 * 86_400_000)
+    rank = 0
+    for t in candidates:
+        first = first_candle_ts(exchange, t["symbol"], probe_since)
+        if first is None:
+            print(f"  [bỏ] {t['symbol']}: không có nến trong cửa sổ {months_needed + 1} "
+                  f"tháng (hoặc lỗi API tạm thời)")
+            continue
+        months = (now_ms - first) / (30.44 * 86_400_000)
+        covered = first <= probe_since + 2 * 3_600_000
+        if not covered and months < months_needed:
+            print(f"  [bỏ] {t['symbol']}: lịch sử {months:.0f} tháng < {months_needed}")
+            continue
+        rank += 1
+        start = pd.to_datetime(first, unit="ms", utc=True).strftime("%Y-%m-%d")
+        hist = (f">= {months_needed + 1} tháng" if covered
+                else f"từ {start} ({months:.0f} tháng)")
+        print(f"{rank:>2}. {t['symbol']:<14} vol24h={t['quote_volume'] / 1e6:>8.1f}M USDT  "
+              f"lịch sử {hist}")
+    print("\nChưa sửa config.yaml. Chọn 8-10 cặp theo rank và tự điền, rồi ghi ngày + quy "
+          "tắc chọn vào README (kèm ghi chú survivorship bias: top volume hôm nay thiên vị "
+          "các coin vẫn còn thanh khoản).")
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -323,6 +373,12 @@ def main():
     sn = sub.add_parser("snapshot",
                         help="Spot config B headline metrics -> results/snapshot_<label>.csv")
     sn.add_argument("--label", required=True)
+    cs = sub.add_parser("cost-sensitivity",
+                        help="Config B over fee x slippage grids (12 runs, ALL printed)")
+    cs.add_argument("--market", choices=["spot", "futures", "all"], default="spot")
+    cs.add_argument("--symbol", default=None)
+    pu = sub.add_parser("pick-universe",
+                        help="OKX spot USDT pairs by 24h volume with exclusions (no config edit)")
     args = parser.parse_args()
     config = load_config("config.yaml")
     try:
@@ -344,6 +400,10 @@ def main():
         cmd_compare_exits(config, args)
     elif args.command == "snapshot":
         cmd_snapshot(config, args)
+    elif args.command == "cost-sensitivity":
+        cmd_cost_sensitivity(config, args)
+    elif args.command == "pick-universe":
+        cmd_pick_universe(config)
 
 
 if __name__ == "__main__":

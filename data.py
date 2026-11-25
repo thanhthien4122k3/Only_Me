@@ -230,6 +230,55 @@ def download_futures(config):
     return meta
 
 
+STABLECOIN_BASES = {"USDT", "USDC", "DAI", "TUSD", "FDUSD", "USDE", "PYUSD", "GUSD",
+                    "BUSD", "EURT", "AEUR", "USDP", "PAX", "USDJ", "USTC", "LUSD",
+                    "FRAX", "USDD", "XUSD"}
+WRAPPED_BASES = {"WBTC", "WETH", "WBETH", "STETH", "RETH", "WEETH", "METH"}
+LEV_SUFFIXES = ("3L", "3S", "5L", "5S", "2L", "2S", "BULL", "BEAR", "UP", "DOWN")
+LEV_PREFIXES = ("2X", "3X", "5X", "10X")
+
+
+def is_excluded_base(base):
+    """Heuristic: stablecoin / wrapped-staked / leveraged token bases."""
+    if base in STABLECOIN_BASES or base in WRAPPED_BASES:
+        return True
+    if base.startswith(LEV_PREFIXES) or base.endswith(LEV_SUFFIXES):
+        return True
+    return False
+
+
+def fetch_spot_usdt_tickers(exchange):
+    """Public tickers: spot USDT pairs, excluded bases removed, ranked by 24h quote volume
+    (top 30). No API key needed."""
+    tickers = exchange.fetch_tickers()
+    rows = []
+    for sym, t in tickers.items():
+        if not sym.endswith("/USDT") or sym.count("/") != 1:
+            continue
+        if t.get("spot") is False:
+            continue
+        base = sym.split("/")[0]
+        if is_excluded_base(base):
+            continue
+        qv = t.get("quoteVolume")
+        if qv is None:
+            qv = (t.get("baseVolume") or 0.0) * (t.get("last") or 0.0)
+        rows.append({"symbol": sym, "base": base, "quote_volume": float(qv or 0.0)})
+    rows.sort(key=lambda r: -r["quote_volume"])
+    return rows[:30]
+
+
+def first_candle_ts(exchange, symbol, since_ms):
+    """First available 1H candle open time (ms) at/after since_ms, or None.
+    Note: OKX history-candles has a max lookback (~5 years) - probing further returns empty."""
+    try:
+        c = exchange.fetch_ohlcv(symbol, "1h", since=since_ms, limit=1,
+                                 params={"type": "HistoryCandles"})
+    except Exception:
+        return None
+    return int(c[0][0]) if c else None
+
+
 def check_data(df, timeframe, cfg):
     """Data quality gate. Returns a list of {"severity": CRITICAL|WARN, "code", "message"}."""
     issues = []
